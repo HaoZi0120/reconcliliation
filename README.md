@@ -14,6 +14,7 @@
 - [结果说明](#结果说明)
 - [图形界面与打包](#图形界面与打包)
 - [命令行用法](#命令行用法)
+- [Git / GitHub 推送](#git--github-推送)
 - [项目文件说明](#项目文件说明)
 - [后期维护提示](#后期维护提示)
 
@@ -293,6 +294,44 @@ dist\订单发票比对工具\
 **请整夹拷贝**，不要只拷单个 exe。若杀软拦截，加入信任/白名单。
 
 重新打包配置见 `订单发票比对工具.spec`（已排除 pandas/numpy，体积约数十 MB）。
+
+---
+
+## Git / GitHub 推送
+
+远程仓库：https://github.com/HaoZi0120/reconcliliation
+
+本机若出现浏览器能打开 GitHub，但 `git push` 报 `Could not connect to server` / `Failed to connect to github.com:443`：多半是 **系统代理只对浏览器生效，Git 未走代理**。
+
+当前环境系统代理一般为 `127.0.0.1:7897`（以「设置 → 代理」或代理软件端口为准）。推送前在 PowerShell 中执行：
+
+```powershell
+$env:Path += ";C:\Program Files\Git\cmd"
+$env:HTTP_PROXY = "http://127.0.0.1:7897"
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
+cd d:\projects\reconciliation
+git push
+```
+
+若希望长期生效（可选）：
+
+```powershell
+git config --global http.proxy http://127.0.0.1:7897
+git config --global https.proxy http://127.0.0.1:7897
+```
+
+取消代理：
+
+```powershell
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
+说明：
+
+- `datas/` 下业务 Excel 已由 `.gitignore` 忽略，不会上传；`templates/` 模板会提交。
+- 若新开终端提示找不到 `git`，可先执行上方 `$env:Path += ...`，或重启 Cursor / 电脑后再试。
+- 代理端口若与 `7897` 不同，请改成你本机实际端口。
 
 ---
 
