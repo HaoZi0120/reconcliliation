@@ -1,0 +1,31 @@
+# 业务数据与比对结果（本地使用，不提交）
+datas/*
+!datas/README.md
+
+# 根目录遗留 Excel（防御性忽略）
+/*.xlsx
+/*.xlsm
+/~$*.xlsx
+/~$*.xls*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
