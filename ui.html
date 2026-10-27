@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>订单发票比对工具</title>
+    <style>
+        :root {
+            --bg: #F3F4F6;
+            --card: #FFFFFF;
+            --primary: #2563EB;
+            --primary-hover: #1D4ED8;
+            --secondary: #F1F5F9;
+            --border: #E2E8F0;
+            --text: #0F172A;
+            --muted: #64748B;
+            --terminal: #0F172A;
+            --slate-50: #F8FAFC;
+            --slate-100: #F1F5F9;
+            --slate-200: #E2E8F0;
+            --slate-300: #CBD5E1;
+            --slate-400: #94A3B8;
+            --slate-500: #64748B;
+            --slate-600: #475569;
+            --slate-800: #1E293B;
+            --slate-900: #0F172A;
+            --slate-950: #020617;
+            --blue-50: #EFF6FF;
+            --blue-100: #DBEAFE;
+            --indigo-500: #6366F1;
+            --indigo-600: #4F46E5;
+            --amber-500: #F59E0B;
+            --emerald-50: #ECFDF5;
+            --emerald-100: #D1FAE5;
+            --emerald-200: #A7F3D0;
+            --emerald-500: #10B981;
+            --emerald-700: #047857;
+            --rose-400: #FB7185;
+            --amber-300: #FCD34D;
+            --amber-400: #FBBF24;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        body {
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            user-select: none;
+            -webkit-font-smoothing: antialiased;
+        }
+        button { font-family: inherit; cursor: pointer; }
+        input { font-family: inherit; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--slate-300); border-radius: 9999px; }
+        .terminal-scroll::-webkit-scrollbar-thumb { background: #334155; }
+
+        .header {
+            background: rgba(255,255,255,0.88);
+            backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+        }
+        .brand { display: flex; align-items: center; gap: 8px; }
+        .brand-icon {
+            width: 20px; height: 20px; background: var(--primary); color: #fff;
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 4px; font-size: 11px; font-weight: 700;
+        }
+        .brand-title { font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+        .badge {
+            background: var(--blue-50); color: var(--primary); font-size: 10px; font-weight: 500;
+            padding: 2px 6px; border-radius: 4px; border: 1px solid var(--blue-100);
+        }
+
+        main {
+            width: 100%; max-width: 1100px; margin: 0 auto;
+            padding: 20px 24px; flex: 1; display: flex; flex-direction: column; gap: 20px;
+        }
+        .card {
+            background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+            padding: 20px; box-shadow: 0 2px 8px -2px rgba(0,0,0,0.05), 0 1px 4px -1px rgba(0,0,0,0.03);
+        }
+        .hero { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+        .hero h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+        .hero p { margin: 0; font-size: 12px; color: var(--muted); }
+        .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            border-radius: 10px; font-size: 12px; font-weight: 500; padding: 8px 12px;
+            border: 1px solid transparent; transition: all .15s ease; white-space: nowrap;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-muted { background: var(--secondary); color: var(--muted); }
+        .btn-muted:hover { background: var(--slate-200); color: var(--text); border-color: var(--slate-300); }
+        .btn-soft { background: var(--blue-50); color: var(--primary); border-color: var(--blue-100); font-weight: 600; }
+        .btn-soft:hover { background: var(--blue-100); }
+        .btn-browse { background: var(--slate-100); color: var(--text); border-color: var(--slate-200); padding: 8px 16px; }
+        .btn-browse:hover { background: var(--slate-200); border-color: var(--slate-300); }
+        .btn-primary {
+            background: var(--primary); color: #fff; padding: 10px 24px;
+            box-shadow: 0 4px 12px -2px rgba(37,99,235,0.25);
+        }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-primary:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn-open {
+            background: var(--slate-100); color: var(--slate-400); border-color: var(--slate-200); padding: 10px 20px;
+        }
+        .btn-open.enabled {
+            background: var(--emerald-50); color: var(--emerald-700); border-color: var(--emerald-200); cursor: pointer;
+        }
+        .btn-open.enabled:hover { background: var(--emerald-100); }
+        .btn-exit { background: transparent; color: var(--slate-500); padding: 10px 16px; }
+        .btn-exit:hover { background: #FEF2F2; color: #DC2626; border-color: #FECACA; }
+
+        .section-head {
+            display: flex; align-items: center; justify-content: space-between;
+            border-bottom: 1px solid var(--slate-100); padding-bottom: 12px; margin-bottom: 16px; gap: 8px;
+        }
+        .section-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin: 0; }
+        .bar { width: 8px; height: 16px; border-radius: 999px; background: var(--primary); }
+        .bar.indigo { background: var(--indigo-500); }
+        .hint { font-size: 12px; color: var(--muted); }
+
+        .field { margin-bottom: 16px; }
+        .field:last-child { margin-bottom: 0; }
+        .field-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12px; }
+        .field-label { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+        .chips { color: var(--slate-400); font-size: 11px; }
+        .chip {
+            display: inline-block; font-family: Consolas, Monaco, monospace; color: var(--slate-600);
+            background: var(--slate-100); padding: 2px 4px; border-radius: 4px; margin: 0 1px;
+        }
+        .row { display: flex; align-items: center; gap: 8px; }
+        .input-wrap { position: relative; flex: 1; }
+        .input-wrap .ico {
+            position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+            color: var(--slate-400); font-size: 12px; pointer-events: none;
+        }
+        .input {
+            width: 100%; padding: 8px 12px 8px 34px; font-size: 12px;
+            background: var(--slate-50); border: 1px solid var(--border); border-radius: 12px;
+            color: var(--text); outline: none; transition: all .15s ease;
+        }
+        .input:focus { background: #fff; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,0.12); }
+        .input.plain { padding-left: 12px; font-family: Consolas, Monaco, monospace; }
+
+        .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        @media (max-width: 800px) { .grid3 { grid-template-columns: 1fr; } }
+        .req { color: #EF4444; }
+
+        .callout {
+            margin-top: 16px; background: rgba(239,246,255,0.7); border: 1px solid var(--blue-100);
+            border-radius: 12px; padding: 12px; font-size: 12px; color: var(--slate-600);
+        }
+        .callout-title { display: flex; align-items: center; gap: 6px; color: var(--primary); font-weight: 600; margin-bottom: 4px; }
+        .callout p { margin: 0; padding-left: 16px; font-size: 11px; line-height: 1.7; color: var(--slate-500); }
+
+        .actions {
+            display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+        }
+        .action-btns { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .progress-box { width: 256px; max-width: 100%; }
+        .progress-meta { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px; }
+        .progress-meta .status { color: var(--muted); font-weight: 500; }
+        .progress-meta .pct { font-family: Consolas, Monaco, monospace; color: var(--primary); font-weight: 600; }
+        .track {
+            width: 100%; background: var(--slate-100); border-radius: 999px; height: 10px;
+            border: 1px solid rgba(226,232,240,0.7); padding: 2px; overflow: hidden;
+        }
+        .bar-fill {
+            height: 100%; width: 0; background: var(--primary); border-radius: 999px;
+            transition: width .3s ease;
+        }
+
+        .terminal {
+            background: var(--terminal); border: 1px solid var(--slate-800); border-radius: 16px;
+            overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.08); display: flex; flex-direction: column;
+        }
+        .terminal-head {
+            background: rgba(15,23,42,0.95); padding: 10px 16px; border-bottom: 1px solid var(--slate-800);
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .terminal-title { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--slate-300); font-family: Consolas, Monaco, monospace; }
+        .terminal-tools { display: flex; gap: 12px; }
+        .terminal-tools button {
+            background: none; border: none; color: var(--slate-400); font-size: 11px;
+            display: inline-flex; align-items: center; gap: 4px; padding: 0;
+        }
+        .terminal-tools button:hover { color: #fff; }
+        #terminalLog {
+            padding: 16px; height: 200px; overflow-y: auto; font-family: Consolas, Monaco, monospace;
+            font-size: 12px; color: var(--slate-300); background: rgba(2,6,17,0.5); user-select: text;
+        }
+        .log-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; font-size: 11px; line-height: 1.6; }
+        .log-time { color: var(--slate-600); flex-shrink: 0; }
+        .log-INFO { color: #60A5FA; }
+        .log-SUCCESS { color: #34D399; font-weight: 700; }
+        .log-WARN { color: var(--amber-400); }
+        .log-ERROR { color: var(--rose-400); font-weight: 700; }
+        .log-msg { color: #CBD5E1; word-break: break-all; }
+        .log-msg.SUCCESS { color: #34D399; }
+        .log-msg.WARN { color: #FCD34D; }
+        .log-msg.ERROR { color: #FB7185; }
+        .log-init { color: var(--slate-500); }
+
+        footer {
+            background: #fff; border-top: 1px solid var(--border); padding: 6px 16px;
+            font-size: 11px; color: var(--muted); display: flex; align-items: center; justify-content: space-between;
+        }
+        .footer-left { display: flex; align-items: center; gap: 16px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--emerald-500); display: inline-block; animation: pulse 1.5s infinite; }
+        .dot.busy { background: var(--amber-400); }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+        .modal {
+            display: none; position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,0.4);
+            backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 16px;
+        }
+        .modal.show { display: flex; }
+        .modal-box {
+            background: #fff; border-radius: 16px; border: 1px solid var(--border); max-width: 520px;
+            width: 100%; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+        }
+        .modal-head, .modal-foot {
+            padding: 14px 20px; border-bottom: 1px solid var(--slate-100);
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .modal-foot { border-bottom: none; border-top: 1px solid var(--slate-100); justify-content: flex-end; }
+        .modal-head h3 { margin: 0; font-size: 15px; }
+        .modal-x { background: none; border: none; color: var(--slate-400); font-size: 16px; }
+        .modal-x:hover { color: var(--text); }
+        #helpBody {
+            margin: 0; padding: 16px 20px; font-size: 12px; color: var(--slate-600);
+            white-space: pre-wrap; overflow-y: auto; flex: 1; font-family: inherit; line-height: 1.7;
+        }
+        .ico-blue { color: #2563EB; }
+        .ico-indigo { color: var(--indigo-600); }
+        .ico-amber { color: var(--amber-500); }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="brand">
+            <div class="brand-icon">¥</div>
+            <span class="brand-title">订单发票比对工具</span>
+            <span id="appVersion" class="badge">Pro3.0</span>
+        </div>
+        <div style="font-size:10px;color:var(--slate-400)">Fluent UI</div>
+    </header>
+
+    <main>
+        <div class="card hero">
+            <div>
+                <h1>订单发票智能比对系统</h1>
+                <p>快速比对订单与发票勾稽关系，自动推算账期并输出差异明细分析报告。</p>
+            </div>
+            <div class="hero-actions">
+                <button class="btn btn-muted" onclick="showFormatHelp()">? 格式说明</button>
+                <button class="btn btn-soft" onclick="downloadTemplate('order')">↓ 下载订单模板</button>
+                <button class="btn btn-soft" onclick="downloadTemplate('invoice')">↓ 下载发票模板</button>
+            </div>
+        </div>
+
+        <section class="card">
+            <div class="section-head">
+                <h2 class="section-title"><span class="bar"></span>数据源文件选择</h2>
+                <span class="hint">支持路径选择 (.xlsx, .xlsm)</span>
+            </div>
+
+            <div class="field">
+                <div class="field-top">
+                    <span class="field-label"><span class="ico-blue">▣</span> 订单数据文件</span>
+                    <span class="chips">包含列: <span class="chip">交货日期</span>, <span class="chip">型号</span>, <span class="chip">数量</span>, <span class="chip">用户价格</span></span>
+                </div>
+                <div class="row">
+                    <div class="input-wrap">
+                        <span class="ico">xlsx</span>
+                        <input class="input" type="text" id="orderFilePath" readonly placeholder="请选择订单 Excel 文件路径...">
+                    </div>
+                    <button class="btn btn-browse" onclick="browseOrder()">浏览...</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <div class="field-top">
+                    <span class="field-label"><span class="ico-indigo">▤</span> 发票数据文件</span>
+                    <span class="chips">包含列: <span class="chip">开票日期</span>, <span class="chip">规格型号</span>, <span class="chip">数量</span>, <span class="chip">单价</span></span>
+                </div>
+                <div class="row">
+                    <div class="input-wrap">
+                        <span class="ico">xlsx</span>
+                        <input class="input" type="text" id="invoiceFilePath" readonly placeholder="选择发票 Excel 后将自动推断查询周期...">
+                    </div>
+                    <button class="btn btn-browse" onclick="browseInvoice()">浏览...</button>
+                </div>
+            </div>
+
+            <div class="field">
+                <div class="field-top">
+                    <span class="field-label"><span class="ico-amber">📁</span> 比对结果保存路径</span>
+                    <span class="chips">导出为 .xlsx 表格</span>
+                </div>
+                <div class="row">
+                    <div class="input-wrap">
+                        <span class="ico">dir</span>
+                        <input class="input" type="text" id="saveFilePath" readonly placeholder="请选择结果保存的目标文件夹及文件名...">
+                    </div>
+                    <button class="btn btn-browse" onclick="browseOutput()">浏览...</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="section-head">
+                <h2 class="section-title"><span class="bar indigo"></span>发票查询周期与账期设置</h2>
+            </div>
+            <div class="grid3">
+                <div>
+                    <div class="field-top"><span class="field-label">周期起始日 <span class="req">*</span></span></div>
+                    <input class="input plain" type="date" id="startDate">
+                </div>
+                <div>
+                    <div class="field-top"><span class="field-label">周期结束日 <span class="req">*</span></span></div>
+                    <input class="input plain" type="date" id="endDate">
+                </div>
+                <div>
+                    <div class="field-top"><span class="field-label">账期 (天) <span class="req">*</span></span></div>
+                    <input class="input plain" type="number" id="accountPeriod" value="30" min="0" max="3650">
+                </div>
+            </div>
+            <div class="callout">
+                <div class="callout-title">ⓘ 自动计算规则说明</div>
+                <p>
+                    • <strong>默认填充：</strong> 选定发票文件后，系统自动提取开票日期的【月初~月末】。账期默认设定为 <strong>30 天</strong>。<br>
+                    • <strong>边界公式：</strong> 期初豁免截止 = 起始 + N天 - 1天； 期末豁免起始 = 结束 - N天 + 1天。
+                </p>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="actions">
+                <div class="action-btns">
+                    <button id="btnStart" class="btn btn-primary" onclick="startProcess()">▶ 导出比对结果</button>
+                    <button id="btnOpen" class="btn btn-open" onclick="openResult()" disabled>打开比对结果</button>
+                    <button class="btn btn-exit" onclick="exitApp()">退出</button>
+                </div>
+                <div class="progress-box">
+                    <div class="progress-meta">
+                        <span id="statusText" class="status">准备就绪</span>
+                        <span id="progressPercent" class="pct">0%</span>
+                    </div>
+                    <div class="track"><div id="progressBar" class="bar-fill"></div></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="terminal">
+            <div class="terminal-head">
+                <div class="terminal-title"><span style="color:#60A5FA">›_</span> 运行日志 (Terminal Log)</div>
+                <div class="terminal-tools">
+                    <button onclick="clearLog()" title="清空日志">清空</button>
+                    <button onclick="copyLog()" title="复制日志">复制</button>
+                </div>
+            </div>
+            <div id="terminalLog" class="terminal-scroll">
+                <div class="log-init">[System Initialized] 欢迎使用订单发票比对工具，请导入 Excel 文件...</div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="footer-left">
+            <span style="display:inline-flex;align-items:center;gap:6px">
+                <span id="engineDot" class="dot"></span>
+                <span id="engineText">引擎正常</span>
+            </span>
+            <span style="color:var(--slate-300)">|</span>
+            <span>编码: UTF-8</span>
+        </div>
+        <div>Microsoft Windows 11 Fluent UI</div>
+    </footer>
+
+    <div id="helpModal" class="modal">
+        <div class="modal-box">
+            <div class="modal-head">
+                <h3>数据格式说明</h3>
+                <button class="modal-x" onclick="closeFormatHelp()">×</button>
+            </div>
+            <pre id="helpBody"></pre>
+            <div class="modal-foot">
+                <button class="btn btn-browse" onclick="closeFormatHelp()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isProcessing = false;
+
+        function api() {
+            return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
+        }
+
+        function addLog(type, message) {
+            const logBox = document.getElementById('terminalLog');
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            const row = document.createElement('div');
+            row.className = 'log-row';
+            row.innerHTML = `<span class="log-time">[${timeStr}]</span><span class="log-${type}">[${type}]</span><span class="log-msg ${type}"></span>`;
+            row.querySelector('.log-msg').textContent = message;
+            logBox.appendChild(row);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('terminalLog').innerHTML = '<div class="log-init">[System Log Cleared] 日志已重置...</div>';
+        }
+
+        async function copyLog() {
+            const text = document.getElementById('terminalLog').innerText;
+            try {
+                await navigator.clipboard.writeText(text);
+                addLog('INFO', '控制台日志已复制到剪贴板。');
+            } catch (e) {
+                addLog('WARN', '复制失败，请手动选择日志文本。');
+            }
+        }
+
+        function setBusy(busy) {
+            isProcessing = busy;
+            const btnStart = document.getElementById('btnStart');
+            btnStart.disabled = busy;
+            document.getElementById('engineText').textContent = busy ? '比对中…' : '引擎正常';
+            document.getElementById('engineDot').className = busy ? 'dot busy' : 'dot';
+            refreshOpenBtn();
+        }
+
+        function setProgress(pct, message) {
+            pct = Math.max(0, Math.min(100, Number(pct) || 0));
+            document.getElementById('progressBar').style.width = pct + '%';
+            document.getElementById('progressPercent').innerText = pct + '%';
+            if (message) document.getElementById('statusText').innerText = message;
+        }
+
+        async function refreshOpenBtn() {
+            const btn = document.getElementById('btnOpen');
+            const path = document.getElementById('saveFilePath').value;
+            let ok = false;
+            if (!isProcessing && path && api()) {
+                try { ok = await api().result_exists(path); } catch (e) { ok = false; }
+            }
+            btn.disabled = !ok;
+            if (ok) btn.classList.add('enabled');
+            else btn.classList.remove('enabled');
+        }
+
+        function maybeSetOutput(suggested) {
+            if (suggested && !document.getElementById('saveFilePath').value) {
+                document.getElementById('saveFilePath').value = suggested;
+            }
+            refreshOpenBtn();
+        }
+
+        async function browseOrder() {
+            if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            const res = await api().browse_order();
+            if (res && res.ok) {
+                document.getElementById('orderFilePath').value = res.path;
+                maybeSetOutput(res.output);
+            }
+        }
+
+        async function browseInvoice() {
+            if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            const months = parseInt(document.getElementById('accountPeriod').value || '1', 10);
+            const res = await api().browse_invoice(months);
+            if (res && res.ok) {
+                document.getElementById('invoiceFilePath').value = res.path;
+                maybeSetOutput(res.output);
+                if (res.period && res.period.start && res.period.end) {
+                    document.getElementById('startDate').value = res.period.start;
+                    document.getElementById('endDate').value = res.period.end;
+                } else if (res.period && res.period.error) {
+                    alert('无法根据发票推断查询周期：\n' + res.period.error);
+                }
+            }
+        }
+
+        async function browseOutput() {
+            if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            const res = await api().browse_output(document.getElementById('saveFilePath').value);
+            if (res && res.ok) {
+                document.getElementById('saveFilePath').value = res.path;
+                refreshOpenBtn();
+            }
+        }
+
+        async function downloadTemplate(kind) {
+            if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            const res = await api().download_template(kind);
+            if (res && res.ok) alert('模板已保存到：\n' + res.path);
+            else if (res && res.error) alert(res.error);
+        }
+
+        async function showFormatHelp() {
+            let text = api() ? await api().get_format_help() : '请通过桌面程序启动以查看完整说明。';
+            document.getElementById('helpBody').textContent = text;
+            document.getElementById('helpModal').classList.add('show');
+            addLog('INFO', '查看了格式说明文档');
+        }
+
+        function closeFormatHelp() {
+            document.getElementById('helpModal').classList.remove('show');
+        }
+
+        async function startProcess(overwriteConfirmed) {
+            if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            if (isProcessing) return;
+
+            const orderPath = document.getElementById('orderFilePath').value;
+            const invoicePath = document.getElementById('invoiceFilePath').value;
+            const savePath = document.getElementById('saveFilePath').value;
+            if (!orderPath || !invoicePath) {
+                addLog('WARN', '请先选择完整的【订单数据文件】与【发票数据文件】！');
+                return;
+            }
+            if (!savePath) {
+                addLog('WARN', '请先指定比对结果保存路径！');
+                return;
+            }
+
+            setBusy(true);
+            setProgress(0, '数据读取中...');
+
+            const res = await api().start_export(
+                orderPath, invoicePath, savePath,
+                document.getElementById('startDate').value,
+                document.getElementById('endDate').value,
+                document.getElementById('accountPeriod').value,
+                !!overwriteConfirmed
+            );
+
+            if (!res || !res.ok) {
+                setBusy(false);
+                if (res && res.needConfirmOverwrite) {
+                    if (confirm('文件已存在，是否覆盖？\n' + res.path)) return startProcess(true);
+                    return;
+                }
+                if (res && res.needAlternate) {
+                    if (confirm(res.error + '\n\n是否另存为其他文件名？')) {
+                        const alt = await api().pick_alternate_output(savePath);
+                        if (alt && alt.ok) {
+                            document.getElementById('saveFilePath').value = alt.path;
+                            return startProcess(true);
+                        }
+                    }
+                    return;
+                }
+                if (res && res.error) {
+                    addLog('ERROR', res.error);
+                    alert(res.error);
+                }
+            }
+        }
+
+        async function openResult() {
+            if (!api()) return;
+            const res = await api().open_result(document.getElementById('saveFilePath').value);
+            if (res && !res.ok && res.error) alert(res.error);
+        }
+
+        async function exitApp() {
+            addLog('WARN', '正在关闭订单发票比对工具...');
+            if (api()) await api().exit_app();
+        }
+
+        window.__hostLog = function (payload) { addLog(payload.level || 'INFO', payload.message || ''); };
+        window.__hostProgress = function (payload) { setProgress(payload.pct, payload.message || ''); };
+        window.__hostSetPeriod = function (payload) {
+            if (payload.start) document.getElementById('startDate').value = payload.start;
+            if (payload.end) document.getElementById('endDate').value = payload.end;
+        };
+        window.__hostExportDone = function (payload) {
+            setBusy(false);
+            setProgress(100, '比对成功完成！');
+            if (payload.output) document.getElementById('saveFilePath').value = payload.output;
+            refreshOpenBtn();
+            if (confirm('比对结果已导出。\n\n' + (payload.summary || '') + '\n\n是否立即打开比对结果？')) openResult();
+        };
+        window.__hostExportFail = async function (payload) {
+            setBusy(false);
+            setProgress(0, '导出失败。');
+            const msg = payload.error || '导出失败';
+            if (payload.permission) {
+                if (confirm(msg + '\n\n是否现在另选保存路径并重试？')) {
+                    const alt = await api().pick_alternate_output(document.getElementById('saveFilePath').value);
+                    if (alt && alt.ok) {
+                        document.getElementById('saveFilePath').value = alt.path;
+                        startProcess(true);
+                    }
+                }
+            } else {
+                alert('导出失败\n\n' + msg);
+            }
+        };
+
+        window.addEventListener('pywebviewready', async () => {
+            try {
+                const d = await api().get_defaults();
+                if (d && d.version) document.getElementById('appVersion').textContent = d.version;
+                if (d && d.accountDays != null) document.getElementById('accountPeriod').value = d.accountDays;
+                addLog('SUCCESS', '桌面引擎已连接，可以开始导入数据。');
+            } catch (e) {
+                addLog('WARN', '初始化默认值失败：' + e);
+            }
+        });
+    </script>
+</body>
+</html>

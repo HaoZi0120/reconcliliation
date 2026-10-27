@@ -74,7 +74,7 @@ VERIFY_PRIORITY_MID_STATUSES = {
     STATUS_PRICE_MISSING,
 }
 
-DEFAULT_ACCOUNT_MONTHS = 1
+DEFAULT_ACCOUNT_DAYS = 30
 
 
 def verify_priority_for(status: str) -> str:
@@ -92,16 +92,9 @@ class PeriodConfig:
 
     start: date
     end: date
-    account_months: int
+    account_days: int
     grace_invoice_until: date  # 开票日<=此日且无订单 → 账期内无订单
     grace_order_from: date  # 交货日>=此日且无发票 → 账期内待开票
-
-
-def add_months(d: date, months: int) -> date:
-    y = d.year + (d.month - 1 + months) // 12
-    m = (d.month - 1 + months) % 12 + 1
-    last = calendar.monthrange(y, m)[1]
-    return date(y, m, min(d.day, last))
 
 
 def to_date_only(v):
@@ -115,23 +108,23 @@ def to_date_only(v):
     return dt.date() if dt else None
 
 
-def build_period_config(start, end, account_months: int) -> PeriodConfig:
+def build_period_config(start, end, account_days: int) -> PeriodConfig:
     start_d = to_date_only(start)
     end_d = to_date_only(end)
     if start_d is None or end_d is None:
         raise ValueError("发票查询周期起止日无效")
     if end_d < start_d:
         raise ValueError("发票查询周期结束日不能早于起始日")
-    months = int(account_months)
-    if months < 0:
-        raise ValueError("账期月数不能为负")
-    # 期初豁免截止日 = 起始日 + N 月 - 1 天；期末豁免起始日 = 结束日 - N 月 + 1 天
-    grace_invoice_until = add_months(start_d, months) - timedelta(days=1)
-    grace_order_from = add_months(end_d, -months) + timedelta(days=1)
+    days = int(account_days)
+    if days < 0:
+        raise ValueError("账期天数不能为负")
+    # 期初豁免截止日 = 起始日 + N 天 - 1 天；期末豁免起始日 = 结束日 - N 天 + 1 天
+    grace_invoice_until = start_d + timedelta(days=days) - timedelta(days=1)
+    grace_order_from = end_d - timedelta(days=days) + timedelta(days=1)
     return PeriodConfig(
         start=start_d,
         end=end_d,
-        account_months=months,
+        account_days=days,
         grace_invoice_until=grace_invoice_until,
         grace_order_from=grace_order_from,
     )
@@ -145,7 +138,7 @@ def month_last_day(d: date) -> date:
     return date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
 
 
-def infer_period_from_invoices(invoices, account_months: int) -> PeriodConfig:
+def infer_period_from_invoices(invoices, account_days: int) -> PeriodConfig:
     """按发票开票日 min/max 所在月：起始=月初第一天，结束=月末最后一天。"""
     dates = [to_date_only(i.get("_inv_dt") or i.get("开票日期")) for i in invoices]
     dates = [d for d in dates if d is not None]
@@ -153,7 +146,7 @@ def infer_period_from_invoices(invoices, account_months: int) -> PeriodConfig:
         raise ValueError("无法从发票数据推断查询周期：无有效开票日期")
     start = month_first_day(min(dates))
     end = month_last_day(max(dates))
-    return build_period_config(start, end, account_months)
+    return build_period_config(start, end, account_days)
 
 
 def bias_for(status: str, side: str | None) -> str:
@@ -467,7 +460,7 @@ def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodCo
     if period and ship_d and ship_d >= period.grace_order_from:
         reasons.append(
             f"GRACE_ORDER:交货日{ship_d}≥期末豁免起始日{period.grace_order_from}，"
-            f"账期内待开票（查询周期{period.start}~{period.end}，账期{period.account_months}月）"
+            f"账期内待开票（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
         )
         return STATUS_GRACE_ORDER, False, reasons, BIAS_ORDER
 
@@ -547,7 +540,7 @@ def classify_unmatched_invoice(inv, orders, so, si, used_ord, period: PeriodConf
     if period and inv_d and inv_d <= period.grace_invoice_until:
         reasons.append(
             f"GRACE_INVOICE:开票日{inv_d}≤期初豁免截止日{period.grace_invoice_until}，"
-            f"账期内无订单（查询周期{period.start}~{period.end}，账期{period.account_months}月）"
+            f"账期内无订单（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
         )
         return STATUS_GRACE_INVOICE, False, reasons, BIAS_INV
 
@@ -818,44 +811,59 @@ INVOICE_OUT_COLS = [
 
 META_COLS = ["核实优先级", "匹配状态", "问题偏向", "是否需人工核对", "异议原因"]
 
-# 列序：A 导航 → B 成对对照 → C 发票专区 → D 订单专区（沟通时手动隐藏 C 或 D）
-# A. 沟通导航
-PRIORITY_COLS_A = [
-    ("meta", "核实优先级"),
-    ("meta", "匹配状态"),
-    ("meta", "问题偏向"),
-    ("meta", "是否需人工核对"),
-    ("meta", "异议原因"),
+# 匹配明细列序：发票（可见）→ 发票其余（隐藏）→ 订单（可见）→ 订单其余（隐藏）→ 匹配结果（可见）→ 问题偏向（隐藏）
+# 已取消原「B 成对对照」区。
+INVOICE_VISIBLE_COLS = [
+    "数电发票号码",
+    "开票日期",
+    "货物或应税劳务名称",
+    "规格型号",
+    "数量",
+    "含税单价",  # 界面/沟通口径中的「含税价格」
 ]
-# B. 对照键（发票↔订单成对相邻）
-PRIORITY_COLS_B = [
-    ("发票", "规格型号"),
-    ("订单", "型号"),
-    ("发票", "数量"),
-    ("订单", "数量"),
-    ("发票", "含税单价"),
-    ("订单", "用户价格"),
-    ("发票", "开票日期"),
-    ("订单", "交货日期"),
-    ("发票", "价税合计"),
-    ("订单", "价格合计"),
+ORDER_VISIBLE_COLS = [
+    "订单号",
+    "型号",
+    "数量",
+    "用户价格",
+    "交货日期",
+    "E率",
 ]
-PRIORITY_COLS = PRIORITY_COLS_A + PRIORITY_COLS_B
+META_VISIBLE_COLS = [
+    "核实优先级",
+    "匹配状态",
+    "问题偏向",
+    "是否需人工核对",
+    "异议原因",
+]
+META_HIDDEN_COLS = []
 
 
 def build_result_columns():
-    """返回 [(kind, field, header), ...]：A+B 后先剩余发票列(C)，再剩余订单列(D)。"""
-    priority_keys = {(k, f) for k, f in PRIORITY_COLS}
-    cols = [(k, f, f if k == "meta" else f"{k}:{f}") for k, f in PRIORITY_COLS]
-
-    # C. 发票方专区（B 中已出现的发票列不再重复）
+    """返回 [(kind, field, header), ...]。"""
+    cols = []
+    inv_seen = set()
+    for f in INVOICE_VISIBLE_COLS:
+        cols.append(("发票", f, f"发票:{f}"))
+        inv_seen.add(f)
     for f in INVOICE_OUT_COLS:
-        if ("发票", f) not in priority_keys:
+        if f not in inv_seen:
             cols.append(("发票", f, f"发票:{f}"))
-    # D. 订单方专区
+            inv_seen.add(f)
+
+    ord_seen = set()
+    for f in ORDER_VISIBLE_COLS:
+        cols.append(("订单", f, f"订单:{f}"))
+        ord_seen.add(f)
     for f in ORDER_OUT_COLS:
-        if ("订单", f) not in priority_keys:
+        if f not in ord_seen:
             cols.append(("订单", f, f"订单:{f}"))
+            ord_seen.add(f)
+
+    for f in META_VISIBLE_COLS:
+        cols.append(("meta", f, f))
+    for f in META_HIDDEN_COLS:
+        cols.append(("meta", f, f))
     return cols
 
 
@@ -869,33 +877,50 @@ DATE_COL_INDEXES = {
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
     if f in ("交货日期", "接单日期", "开票日期")
 }
-_B_KEYS = set(PRIORITY_COLS_B)
-ZONE_A_COLS = {
-    i + 1 for i, (k, f, _) in enumerate(RESULT_COLUMNS) if k == "meta"
-}
-ZONE_B_INV_COLS = {
+
+_INV_VISIBLE = set(INVOICE_VISIBLE_COLS)
+_ORD_VISIBLE = set(ORDER_VISIBLE_COLS)
+_META_VISIBLE = set(META_VISIBLE_COLS)
+
+# 分区：发票可见 / 发票其余 / 订单可见 / 订单其余 / 匹配结果
+ZONE_INV_VISIBLE_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "发票" and (k, f) in _B_KEYS
+    if k == "发票" and f in _INV_VISIBLE
 }
-ZONE_B_ORD_COLS = {
+ZONE_INV_HIDDEN_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "订单" and (k, f) in _B_KEYS
+    if k == "发票" and f not in _INV_VISIBLE
 }
-ZONE_C_COLS = {
+ZONE_ORD_VISIBLE_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "发票" and (k, f) not in _B_KEYS
+    if k == "订单" and f in _ORD_VISIBLE
 }
-ZONE_D_COLS = {
+ZONE_ORD_HIDDEN_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "订单" and (k, f) not in _B_KEYS
+    if k == "订单" and f not in _ORD_VISIBLE
 }
+ZONE_META_VISIBLE_COLS = {
+    i + 1
+    for i, (k, f, _) in enumerate(RESULT_COLUMNS)
+    if k == "meta" and f in _META_VISIBLE
+}
+ZONE_META_HIDDEN_COLS = {
+    i + 1
+    for i, (k, f, _) in enumerate(RESULT_COLUMNS)
+    if k == "meta" and f not in _META_VISIBLE
+}
+HIDDEN_COL_INDEXES = (
+    ZONE_INV_HIDDEN_COLS | ZONE_ORD_HIDDEN_COLS | ZONE_META_HIDDEN_COLS
+)
 META_COL_INDEX = {
     f: i + 1 for i, (k, f, _) in enumerate(RESULT_COLUMNS) if k == "meta"
 }
+# 冻结在发票可见区之后，横滑先看到订单再看到匹配结果
+FREEZE_AFTER_COL = len(INVOICE_VISIBLE_COLS) + 1  # 下一列字母，如 G
 
 
 def fmt_cell(v):
@@ -933,31 +958,32 @@ def result_cell_value(r, kind, field):
 
 
 def _zone_header_style(col_idx: int):
-    if col_idx in ZONE_A_COLS:
-        return FILL_ZONE_A_HEADER, FONT_HEADER_WHITE
-    if col_idx in ZONE_B_INV_COLS:
+    # 发票可见：绿底白字；发票其余：浅绿深字；订单可见：蓝底白字；订单其余：浅蓝深字；匹配：深紫白字
+    if col_idx in ZONE_INV_VISIBLE_COLS:
         return FILL_ZONE_B_INV_HEADER, FONT_HEADER_WHITE
-    if col_idx in ZONE_B_ORD_COLS:
-        return FILL_ZONE_B_ORD_HEADER, FONT_HEADER_WHITE
-    if col_idx in ZONE_C_COLS:
+    if col_idx in ZONE_INV_HIDDEN_COLS:
         return FILL_ZONE_C_HEADER, FONT_HEADER_DARK
-    if col_idx in ZONE_D_COLS:
+    if col_idx in ZONE_ORD_VISIBLE_COLS:
+        return FILL_ZONE_B_ORD_HEADER, FONT_HEADER_WHITE
+    if col_idx in ZONE_ORD_HIDDEN_COLS:
         return FILL_ZONE_D_HEADER, FONT_HEADER_DARK
+    if col_idx in ZONE_META_VISIBLE_COLS or col_idx in ZONE_META_HIDDEN_COLS:
+        return FILL_ZONE_A_HEADER, FONT_HEADER_WHITE
     return HEADER_FILL, Font(bold=True)
 
 
 def _zone_data_fill(col_idx: int):
-    if col_idx in ZONE_A_COLS:
-        return FILL_ZONE_A_DATA
-    if col_idx in ZONE_B_INV_COLS:
+    if col_idx in ZONE_INV_VISIBLE_COLS:
         return FILL_ZONE_B_INV_DATA
-    if col_idx in ZONE_B_ORD_COLS:
-        return FILL_ZONE_B_ORD_DATA
-    if col_idx in ZONE_C_COLS:
+    if col_idx in ZONE_INV_HIDDEN_COLS:
         return FILL_ZONE_C_DATA
-    if col_idx in ZONE_D_COLS:
+    if col_idx in ZONE_ORD_VISIBLE_COLS:
+        return FILL_ZONE_B_ORD_DATA
+    if col_idx in ZONE_ORD_HIDDEN_COLS:
         return FILL_ZONE_D_DATA
-    return FILL_ZONE_A_DATA  # 兜底，避免残留白底
+    if col_idx in ZONE_META_VISIBLE_COLS or col_idx in ZONE_META_HIDDEN_COLS:
+        return FILL_ZONE_A_DATA
+    return FILL_ZONE_A_DATA
 
 
 def write_detail_header(ws):
@@ -1021,15 +1047,50 @@ def write_result_rows(ws, rows):
 
     last = max(1, ws.max_row)
     ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last}"
-    ws.freeze_panes = "P2"
+    ws.freeze_panes = f"{get_column_letter(FREEZE_AFTER_COL)}2"
+    for ci in HIDDEN_COL_INDEXES:
+        ws.column_dimensions[get_column_letter(ci)].hidden = True
     _autosize(ws, max_width=28)
+
+
+def _row_event_datetime(r) -> datetime:
+    """明细排序用的「发生日」：优先开票日，否则交货日，再否则接单日。"""
+    inv = r.get("invoice")
+    order = r.get("order")
+    if inv:
+        inv_dt = inv.get("_inv_dt")
+        if inv_dt is not None:
+            return inv_dt
+    if order:
+        ship_dt = order.get("_ship_dt")
+        if ship_dt is not None:
+            return ship_dt
+        recv = order.get("接单日期")
+        recv_dt = to_datetime(recv) if recv is not None else None
+        if recv_dt is not None:
+            return recv_dt
+    return datetime.max
+
+
+def _row_secondary_datetime(r) -> datetime:
+    """次要日期：另一侧日期，便于同日行稳定对照。"""
+    inv = r.get("invoice")
+    order = r.get("order")
+    inv_dt = inv.get("_inv_dt") if inv else None
+    ship_dt = order.get("_ship_dt") if order else None
+    # 发生日若用了开票日，次要用交货日；反之亦然
+    if inv_dt is not None:
+        return ship_dt or datetime.max
+    if ship_dt is not None:
+        return inv_dt or datetime.max
+    return datetime.max
 
 
 def write_detail_sheet(wb, results):
     ws = wb.create_sheet("匹配明细", 0)
 
     def sort_key(r):
-        """相同型号聚拢；组内按开票日期、交货日期升序。"""
+        """相同型号聚拢；组内按发生日时间线升序（有开票日用开票日，否则交货日）。"""
         o = r["order"]
         i = r["invoice"]
         group_model = (
@@ -1037,9 +1098,12 @@ def write_detail_sheet(wb, results):
             or (i.get("_model_key") if i else None)
             or ""
         )
-        inv_dt = (i.get("_inv_dt") if i else None) or datetime.max
-        ship_dt = (o.get("_ship_dt") if o else None) or datetime.max
-        return (group_model, inv_dt, ship_dt)
+        return (
+            group_model,
+            _row_event_datetime(r),
+            _row_secondary_datetime(r),
+            r.get("status") or "",
+        )
 
     write_result_rows(ws, sorted(results, key=sort_key))
     return ws
@@ -1186,7 +1250,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
     if period:
         period_lines = [
             f"发票查询周期：{period.start} ~ {period.end}",
-            f"账期：{period.account_months} 个月",
+            f"账期：{period.account_days} 天",
             f"期初豁免截止日（开票日≤此日无订单→账期内无订单）：{period.grace_invoice_until}",
             f"期末豁免起始日（交货日≥此日无发票→账期内待开票）：{period.grace_order_from}",
             "",
@@ -1206,7 +1270,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "3. 行级一对一；优先数量完全相等，再比价格接近，再 FIFO",
         f"4. 价格容差：|用户价格 - 含税单价| ≤ {PRICE_TOLERANCE}",
         "5. 业务：含税单价不得高于用户价格（申请含税价）",
-        "6. 账期：起始日+N月-1天=期初豁免截止；结束日-N月+1天=期末豁免起始",
+        "6. 账期：起始日+N天-1天=期初豁免截止；结束日-N天+1天=期末豁免起始",
         "",
         "三、状态定义",
         "完全匹配：日期合法 + 数量相等 + |用户价格-含税单价|≤容差",
@@ -1225,11 +1289,13 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "空（不沟通）：完全匹配；账期内待开票；账期内无订单；不参与比对；实际售价低于申请价格",
         "筛选用法：在「匹配明细」对「核实优先级」筛选「高」或「中」",
         "",
-        "四-附、匹配明细列序（便于沟通时手动隐藏）",
-        "A 导航：核实优先级、匹配状态、问题偏向、是否需人工核对、异议原因",
-        "B 成对对照：规格型号↔型号、数量↔数量、含税单价↔用户价格、开票日期↔交货日期、价税合计↔价格合计",
-        "C 发票专区：其余发票列（对订单方沟通时可整段隐藏）",
-        "D 订单专区：其余订单列（对发票方沟通时可整段隐藏）",
+        "四-附、匹配明细列序（取消成对对照区；其余列保留但默认隐藏）",
+        "1. 发票可见：数电发票号码、开票日期、货物或应税劳务名称、规格型号、数量、含税单价",
+        "2. 发票其余列（默认隐藏，可取消隐藏查看）",
+        "3. 订单可见：订单号、型号、数量、用户价格、交货日期、E率",
+        "4. 订单其余列（默认隐藏）",
+        "5. 匹配结果：核实优先级、匹配状态、问题偏向、是否需人工核对、异议原因",
+        "明细排序：同型号内按发生日升序——有开票日用开票日，仅订单则用交货日（再退接单日），避免未开票订单沉底",
         "",
         "五、问题偏向（三选一，仅未配相关行填写）",
         "订单未开票：订单侧未配或同型号日期/数量问题在订单行",
@@ -1237,9 +1303,8 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "其他：配对竞争占用、数据异常等",
         "",
         "六、匹配明细颜色规则",
-        "【表头】A 导航=深紫底白字；B 对照发票侧=绿底白字；B 对照订单侧=蓝底白字；C 发票专区=浅绿底深字；D 订单专区=浅蓝底深字",
+        "【表头】发票可见=绿底白字；发票其余=浅绿底深字；订单可见=蓝底白字；订单其余=浅蓝底深字；匹配结果=深紫底白字",
         "【行底】核实优先级「高」=浅橙整行；「中」=浅黄整行；数据异常=浅红整行（优先于高/中）；空优先级=不铺整行色，按分区浅底",
-        "【分区浅底（仅空优先级行）】A 浅紫；B 发票侧浅绿；B 订单侧浅蓝；C 发票专区更浅绿；D 订单专区更浅蓝",
         "【字体】核实「高」=橙红加粗；核实「中」=褐色加粗；匹配状态「实际售价高于申请价格」=红色加粗；问题偏向「其他」=灰紫字；异议原因=灰色小字",
         "【不做】完全匹配不用绿色字；不为每种匹配状态单独设行色",
         "",
@@ -1382,12 +1447,13 @@ def run_reconcile(
     save_preprocess_files: bool = False,
     period_start=None,
     period_end=None,
-    account_months: int = DEFAULT_ACCOUNT_MONTHS,
+    account_days: int = DEFAULT_ACCOUNT_DAYS,
     progress_callback=None,
 ):
     """执行比对并写出结果。返回统计信息字典。
 
     period_start/period_end 为空时，按发票开票日 min/max 所在月的月初～月末推断查询周期。
+    account_days 为账期天数。
     progress_callback 可选，签名为 callback(pct: int, message: str)，百分比单调递增。
     """
     def _progress(pct: int, message: str):
@@ -1431,9 +1497,9 @@ def run_reconcile(
 
     period_inferred = False
     if period_start is not None and period_end is not None:
-        period = build_period_config(period_start, period_end, account_months)
+        period = build_period_config(period_start, period_end, account_days)
     else:
-        period = infer_period_from_invoices(invoices, account_months)
+        period = infer_period_from_invoices(invoices, account_days)
         period_inferred = True
     _progress(50, "查询周期已确定")
 
@@ -1487,7 +1553,7 @@ def run_reconcile(
         ),
         "period_start": str(period.start),
         "period_end": str(period.end),
-        "account_months": period.account_months,
+        "account_days": period.account_days,
         "grace_invoice_until": str(period.grace_invoice_until),
         "grace_order_from": str(period.grace_order_from),
         "period_inferred": period_inferred,
@@ -1518,7 +1584,7 @@ def prompt_with_default(label: str, default: str) -> str:
     return raw if raw else default
 
 
-def peek_period_from_invoice_file(invoice_path: Path, account_months: int) -> PeriodConfig:
+def peek_period_from_invoice_file(invoice_path: Path, account_days: int) -> PeriodConfig:
     """读取发票文件并按开票日推断查询周期（不写结果）。"""
     _, inv_raw, _ = read_sheet_rows(
         invoice_path, required_headers=INVOICE_REQUIRED_HEADERS
@@ -1526,24 +1592,24 @@ def peek_period_from_invoice_file(invoice_path: Path, account_months: int) -> Pe
     if not inv_raw:
         raise ValueError("发票文件没有有效数据行，无法推断查询周期")
     invoices = preprocess_invoices(inv_raw)
-    return infer_period_from_invoices(invoices, account_months)
+    return infer_period_from_invoices(invoices, account_days)
 
 
 def resolve_period_interactively(
     invoice_path: Path,
-    account_months: int,
+    account_days: int,
     period_start=None,
     period_end=None,
     non_interactive: bool = False,
 ) -> tuple[date, date, int, bool]:
     """
     上传/选定发票后：按发票开票日推断周期，打印到 CLI，并允许手动修改。
-    返回 (起始日, 结束日, 账期月数, 是否仍为推断未改周期边界)。
+    返回 (起始日, 结束日, 账期天数, 是否仍为推断未改周期边界)。
     """
-    inferred = peek_period_from_invoice_file(invoice_path, account_months)
+    inferred = peek_period_from_invoice_file(invoice_path, account_days)
     start = to_date_only(period_start) or inferred.start
     end = to_date_only(period_end) or inferred.end
-    months = int(account_months)
+    days = int(account_days)
 
     print("")
     print("=== 发票查询周期 / 账期 ===")
@@ -1551,10 +1617,10 @@ def resolve_period_interactively(
     print(
         f"已根据发票开票日推断查询周期（起始月月初～结束月月末）："
         f"{inferred.start} ~ {inferred.end}"
-        f"（账期默认 {months} 个月）"
+        f"（账期默认 {days} 天）"
     )
-    preview = build_period_config(start, end, months)
-    print(f"当前将使用：{preview.start} ~ {preview.end}，账期 {preview.account_months} 个月")
+    preview = build_period_config(start, end, days)
+    print(f"当前将使用：{preview.start} ~ {preview.end}，账期 {preview.account_days} 天")
     print(f"  期初豁免截止日：{preview.grace_invoice_until}")
     print(f"  期末豁免起始日：{preview.grace_order_from}")
 
@@ -1562,30 +1628,30 @@ def resolve_period_interactively(
         still_inferred = (
             start == inferred.start and end == inferred.end and period_start is None and period_end is None
         )
-        return start, end, months, still_inferred
+        return start, end, days, still_inferred
 
     print("可直接回车保留当前值，或输入新值后回车：")
     while True:
         try:
             start_s = prompt_with_default("发票查询周期起始日", str(start))
             end_s = prompt_with_default("发票查询周期结束日", str(end))
-            months_s = prompt_with_default("账期月数", str(months))
+            days_s = prompt_with_default("账期天数", str(days))
             start = parse_cli_date(start_s, "发票查询周期起始日")
             end = parse_cli_date(end_s, "发票查询周期结束日")
-            months = int(months_s)
-            if months < 0:
-                raise ValueError("账期月数不能为负")
-            cfg = build_period_config(start, end, months)
+            days = int(days_s)
+            if days < 0:
+                raise ValueError("账期天数不能为负")
+            cfg = build_period_config(start, end, days)
             break
         except (ValueError, TypeError) as exc:
             print(f"输入无效：{exc}，请重新输入。")
 
     print(
-        f"已确认：查询周期 {cfg.start} ~ {cfg.end}，账期 {cfg.account_months} 个月；"
+        f"已确认：查询周期 {cfg.start} ~ {cfg.end}，账期 {cfg.account_days} 天；"
         f"期初豁免截止 {cfg.grace_invoice_until}，期末豁免起始 {cfg.grace_order_from}"
     )
     still_inferred = start == inferred.start and end == inferred.end
-    return start, end, months, still_inferred
+    return start, end, days, still_inferred
 
 
 def build_arg_parser():
@@ -1611,10 +1677,10 @@ def build_arg_parser():
         help="Query period end YYYY-MM-DD; omit to infer from invoice dates",
     )
     p.add_argument(
-        "--account-months",
+        "--account-days",
         type=int,
-        default=DEFAULT_ACCOUNT_MONTHS,
-        help=f"Account period in months (default {DEFAULT_ACCOUNT_MONTHS})",
+        default=DEFAULT_ACCOUNT_DAYS,
+        help=f"Account period in days (default {DEFAULT_ACCOUNT_DAYS})",
     )
     p.add_argument(
         "--non-interactive",
@@ -1636,7 +1702,7 @@ def main(argv=None):
     order_path = Path(args.order)
     invoice_path = Path(args.invoice)
     output_path = Path(args.output)
-    months = int(args.account_months)
+    days = int(args.account_days)
     start_arg = args.period_start
     end_arg = args.period_end
     non_interactive = bool(args.non_interactive)
@@ -1646,8 +1712,8 @@ def main(argv=None):
             "--period-start and --period-end must be provided together, "
             "or both omitted (infer from invoice)"
         )
-    if months < 0:
-        parser.error("--account-months cannot be negative")
+    if days < 0:
+        parser.error("--account-days cannot be negative")
 
     if not invoice_path.is_file():
         raise SystemExit(f"发票文件不存在：{invoice_path}")
@@ -1657,9 +1723,9 @@ def main(argv=None):
     period_start = parse_cli_date(start_arg, "发票查询周期起始日") if start_arg else None
     period_end = parse_cli_date(end_arg, "发票查询周期结束日") if end_arg else None
 
-    period_start, period_end, months, still_inferred = resolve_period_interactively(
+    period_start, period_end, days, still_inferred = resolve_period_interactively(
         invoice_path,
-        months,
+        days,
         period_start=period_start,
         period_end=period_end,
         non_interactive=non_interactive,
@@ -1672,7 +1738,7 @@ def main(argv=None):
         save_preprocess_files=bool(args.save_preprocess),
         period_start=period_start,
         period_end=period_end,
-        account_months=months,
+        account_days=days,
     )
     stats["period_inferred"] = still_inferred
 
@@ -1684,7 +1750,7 @@ def main(argv=None):
     )
     print(
         f"查询周期: {stats['period_start']} ~ {stats['period_end']}  "
-        f"账期: {stats['account_months']}月"
+        f"账期: {stats['account_days']}天"
         f"{'（发票推断）' if stats['period_inferred'] else ''}"
     )
     print(
