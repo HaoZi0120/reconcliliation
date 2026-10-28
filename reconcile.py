@@ -10,7 +10,7 @@
 6. 多候选 FIFO 成功：算完全匹配，写 MULTI_CAND
 7. 原文仅大小写/空格差异：写 CASE_DIFF / SPACE_DIFF，仍可完全匹配
 8. 订单预处理：用户后增加「E率」=(价格/1.13/E价)-1
-9. 发票数量为负或状态含「已红冲」：不参与比对，但保留在结果中（状态「不参与比对」）
+9. 发票数量为负或状态为「已红冲-全额」：不参与比对但保留数据；「已红冲-部分」仍参与比对
 10. 订单侧底色浅蓝；需人工核对整行浅黄；数据异常浅红
 """
 
@@ -36,7 +36,8 @@ OUTPUT_FILE = DATA_DIR / "比对结果.xlsx"
 ORDER_REQUIRED_HEADERS = {"交货日期", "型号", "数量", "用户价格"}
 INVOICE_REQUIRED_HEADERS = {"开票日期", "规格型号", "数量", "单价"}
 
-EXCLUDED_INVOICE_STATUS_KEYWORD = "已红冲"
+# 仅「已红冲-全额」排除；「已红冲-部分」仍参与比对
+EXCLUDED_INVOICE_STATUS_FULL_FLUSH = "已红冲-全额"
 PRICE_TOLERANCE = 0.02
 # 已配对但价格相关的细分状态（均 need_manual=True）
 STATUS_PRICE_OVER = "实际售价高于申请价格"
@@ -197,12 +198,33 @@ THIN = Border(
 
 
 def to_float(v):
+    """文本/数字转 float；支持去千分位逗号与首尾空白。"""
     if v is None or v == "":
         return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip().replace(",", "").replace("，", "").replace(" ", "")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
     try:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def to_int_qty(v):
+    """数量转整数（先解析为数字再四舍五入）。"""
+    f = to_float(v)
+    if f is None:
+        return None
+    return int(round(f))
 
 
 def to_datetime(v):
@@ -304,18 +326,26 @@ def preprocess_orders(rows):
             row["价格合计"] = round(qty * price, 6)
         else:
             row["价格合计"] = None
-        # E率 = (价格/1.13/E价)-1
+        # E率 = round(((价格/1.13/E价)-1)*100)，整数百分比，不留小数
         list_price = to_float(row.get("价格"))
         e_price = to_float(row.get("E价"))
         if list_price is not None and e_price is not None and e_price != 0:
-            row["E率"] = (list_price / 1.13 / e_price) - 1
+            row["E率"] = int(round(((list_price / 1.13 / e_price) - 1) * 100))
         else:
             row["E率"] = None
+        # 交货日期 / 接单日期：只保留年月日
+        ship_d = to_date_only(row.get("交货日期"))
+        row["交货日期"] = ship_d
+        recv_d = to_date_only(row.get("接单日期"))
+        if "接单日期" in row or recv_d is not None:
+            row["接单日期"] = recv_d
         row["_src_idx"] = idx
         row["_model_key"] = norm_model_key(row.get("型号"))
         row["_qty"] = qty
         row["_user_price"] = price
-        row["_ship_dt"] = to_datetime(row.get("交货日期"))
+        row["_ship_dt"] = (
+            datetime(ship_d.year, ship_d.month, ship_d.day) if ship_d else None
+        )
         out.append(row)
     out.sort(
         key=lambda x: (
@@ -334,29 +364,43 @@ def invoice_exclude_reasons(row) -> list[str]:
     if qty is not None and qty < 0:
         reasons.append(f"EXCL_NEG_QTY:发票数量为负数（{qty:g}），不参与比对")
     status = row.get("发票状态")
-    if status is not None and EXCLUDED_INVOICE_STATUS_KEYWORD in str(status):
+    if status is not None and EXCLUDED_INVOICE_STATUS_FULL_FLUSH in str(status):
         reasons.append(
-            f"EXCL_RED_FLUSH:发票状态含「{EXCLUDED_INVOICE_STATUS_KEYWORD}」"
-            f"（实际为「{str(status).strip()}」），不参与比对"
+            f"EXCL_RED_FLUSH:发票状态为「{EXCLUDED_INVOICE_STATUS_FULL_FLUSH}」"
+            f"（实际为「{str(status).strip()}」），不参与比对；"
+            "「已红冲-部分」仍参与比对"
         )
     return reasons
 
 
 def preprocess_invoices(rows):
-    """返回带含税单价的发票列表（已排序）；标记不参与比对的行。"""
+    """返回带含税单价的发票列表（已排序）；标记不参与比对的行。
+
+    数量、单价若为文本则转为数字：数量保留整数，单价保留 2 位小数。
+    """
     out = []
     for idx, r in enumerate(rows):
         row = dict(r)
+        qty = to_int_qty(row.get("数量"))
+        row["数量"] = qty
         unit = to_float(row.get("单价"))
         if unit is not None:
+            unit = round(unit, 2)
+            row["单价"] = unit
             row["含税单价"] = round(unit * 1.13, 10)
         else:
+            row["单价"] = None
             row["含税单价"] = None
+        # 开票日期：只保留年月日
+        inv_d = to_date_only(row.get("开票日期"))
+        row["开票日期"] = inv_d
         row["_src_idx"] = idx
         row["_model_key"] = norm_model_key(row.get("规格型号"))
-        row["_qty"] = to_float(row.get("数量"))
+        row["_qty"] = float(qty) if qty is not None else None
         row["_tax_price"] = row["含税单价"]
-        row["_inv_dt"] = to_datetime(row.get("开票日期"))
+        row["_inv_dt"] = (
+            datetime(inv_d.year, inv_d.month, inv_d.day) if inv_d else None
+        )
         row["_exclude_reasons"] = invoice_exclude_reasons(row)
         out.append(row)
     out.sort(
@@ -772,33 +816,35 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
     return results, so, si
 
 
+# 预处理/明细用的全量字段（顺序供预处理 sheet；明细顺序见下方 DETAIL_*）
 ORDER_OUT_COLS = [
     "交货日期",
     "订单号",
     "型号",
     "数量",
     "用户价格",
+    "E率",
     "价格合计",
     "价格",
     "E价",
     "接单日期",
     "订单状态",
     "用户",
-    "E率",
+    "战略标记",
+    "统计对象",
 ]
 
 INVOICE_OUT_COLS = [
+    "数电发票号码",
+    "货物或应税劳务名称",
+    "规格型号",
+    "数量",
+    "含税单价",
     "序号",
     "发票代码",
     "发票号码",
-    "数电发票号码",
-    "开票日期",
-    "货物或应税劳务名称",
-    "规格型号",
     "单位",
-    "数量",
     "单价",
-    "含税单价",
     "金额",
     "税率",
     "税额",
@@ -807,63 +853,52 @@ INVOICE_OUT_COLS = [
     "购买方名称",
     "销方名称",
     "备注",
+    "开票日期",
 ]
 
 META_COLS = ["核实优先级", "匹配状态", "问题偏向", "是否需人工核对", "异议原因"]
 
-# 匹配明细列序：发票（可见）→ 发票其余（隐藏）→ 订单（可见）→ 订单其余（隐藏）→ 匹配结果（可见）→ 问题偏向（隐藏）
-# 已取消原「B 成对对照」区。
-INVOICE_VISIBLE_COLS = [
-    "数电发票号码",
-    "开票日期",
-    "货物或应税劳务名称",
-    "规格型号",
-    "数量",
-    "含税单价",  # 界面/沟通口径中的「含税价格」
-]
-ORDER_VISIBLE_COLS = [
-    "订单号",
-    "型号",
-    "数量",
-    "用户价格",
-    "交货日期",
-    "E率",
-]
-META_VISIBLE_COLS = [
-    "核实优先级",
-    "匹配状态",
-    "问题偏向",
-    "是否需人工核对",
-    "异议原因",
-]
-META_HIDDEN_COLS = []
+# 匹配明细：按下列显式顺序排布；HIDDEN 集合内的列写入但默认隐藏
+DETAIL_INVOICE_COLS = list(INVOICE_OUT_COLS)
+DETAIL_ORDER_COLS = list(ORDER_OUT_COLS)
+DETAIL_META_COLS = list(META_COLS)
+
+INVOICE_HIDDEN_FIELDS = {
+    "序号",
+    "发票代码",
+    "发票号码",
+    "单位",
+    "单价",
+    "金额",
+    "税率",
+    "税额",
+    "价税合计",
+    "发票状态",
+    "购买方名称",
+    "销方名称",
+    "备注",
+}
+ORDER_HIDDEN_FIELDS = {
+    "价格合计",
+    "价格",
+    "E价",
+    "接单日期",
+    "订单状态",
+    "用户",
+}
+META_HIDDEN_FIELDS: set[str] = set()
+
+# 兼容旧名：可见列 = 明细列中未隐藏者
+INVOICE_VISIBLE_COLS = [f for f in DETAIL_INVOICE_COLS if f not in INVOICE_HIDDEN_FIELDS]
+ORDER_VISIBLE_COLS = [f for f in DETAIL_ORDER_COLS if f not in ORDER_HIDDEN_FIELDS]
+META_VISIBLE_COLS = [f for f in DETAIL_META_COLS if f not in META_HIDDEN_FIELDS]
 
 
 def build_result_columns():
-    """返回 [(kind, field, header), ...]。"""
-    cols = []
-    inv_seen = set()
-    for f in INVOICE_VISIBLE_COLS:
-        cols.append(("发票", f, f"发票:{f}"))
-        inv_seen.add(f)
-    for f in INVOICE_OUT_COLS:
-        if f not in inv_seen:
-            cols.append(("发票", f, f"发票:{f}"))
-            inv_seen.add(f)
-
-    ord_seen = set()
-    for f in ORDER_VISIBLE_COLS:
-        cols.append(("订单", f, f"订单:{f}"))
-        ord_seen.add(f)
-    for f in ORDER_OUT_COLS:
-        if f not in ord_seen:
-            cols.append(("订单", f, f"订单:{f}"))
-            ord_seen.add(f)
-
-    for f in META_VISIBLE_COLS:
-        cols.append(("meta", f, f))
-    for f in META_HIDDEN_COLS:
-        cols.append(("meta", f, f))
+    """返回 [(kind, field, header), ...]：发票 → 订单 → 匹配结果。"""
+    cols = [("发票", f, f"发票:{f}") for f in DETAIL_INVOICE_COLS]
+    cols += [("订单", f, f"订单:{f}") for f in DETAIL_ORDER_COLS]
+    cols += [("meta", f, f) for f in DETAIL_META_COLS]
     return cols
 
 
@@ -878,40 +913,35 @@ DATE_COL_INDEXES = {
     if f in ("交货日期", "接单日期", "开票日期")
 }
 
-_INV_VISIBLE = set(INVOICE_VISIBLE_COLS)
-_ORD_VISIBLE = set(ORDER_VISIBLE_COLS)
-_META_VISIBLE = set(META_VISIBLE_COLS)
-
-# 分区：发票可见 / 发票其余 / 订单可见 / 订单其余 / 匹配结果
 ZONE_INV_VISIBLE_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "发票" and f in _INV_VISIBLE
+    if k == "发票" and f not in INVOICE_HIDDEN_FIELDS
 }
 ZONE_INV_HIDDEN_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "发票" and f not in _INV_VISIBLE
+    if k == "发票" and f in INVOICE_HIDDEN_FIELDS
 }
 ZONE_ORD_VISIBLE_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "订单" and f in _ORD_VISIBLE
+    if k == "订单" and f not in ORDER_HIDDEN_FIELDS
 }
 ZONE_ORD_HIDDEN_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "订单" and f not in _ORD_VISIBLE
+    if k == "订单" and f in ORDER_HIDDEN_FIELDS
 }
 ZONE_META_VISIBLE_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "meta" and f in _META_VISIBLE
+    if k == "meta" and f not in META_HIDDEN_FIELDS
 }
 ZONE_META_HIDDEN_COLS = {
     i + 1
     for i, (k, f, _) in enumerate(RESULT_COLUMNS)
-    if k == "meta" and f not in _META_VISIBLE
+    if k == "meta" and f in META_HIDDEN_FIELDS
 }
 HIDDEN_COL_INDEXES = (
     ZONE_INV_HIDDEN_COLS | ZONE_ORD_HIDDEN_COLS | ZONE_META_HIDDEN_COLS
@@ -919,8 +949,8 @@ HIDDEN_COL_INDEXES = (
 META_COL_INDEX = {
     f: i + 1 for i, (k, f, _) in enumerate(RESULT_COLUMNS) if k == "meta"
 }
-# 冻结在发票可见区之后，横滑先看到订单再看到匹配结果
-FREEZE_AFTER_COL = len(INVOICE_VISIBLE_COLS) + 1  # 下一列字母，如 G
+# 冻结在整段发票列之后，便于对照订单与匹配结果
+FREEZE_AFTER_COL = len(DETAIL_INVOICE_COLS) + 1
 
 
 def fmt_cell(v):
@@ -1020,8 +1050,10 @@ def write_result_rows(ws, rows):
         for ci, (kind, field, _) in enumerate(RESULT_COLUMNS, start=1):
             cell = ws.cell(ri, ci, result_cell_value(r, kind, field))
             cell.border = THIN
-            if ci in DATE_COL_INDEXES and isinstance(cell.value, datetime):
+            if ci in DATE_COL_INDEXES and isinstance(cell.value, (datetime, date)):
                 cell.number_format = "yyyy-mm-dd"
+            if kind == "订单" and field == "E率" and isinstance(cell.value, (int, float)):
+                cell.number_format = '0"%"'
 
             if row_fill is not None:
                 cell.fill = row_fill
@@ -1044,6 +1076,14 @@ def write_result_rows(ws, rows):
 
             if kind != "meta" and field in ("数量", "用户价格", "含税单价", "价税合计", "价格合计", "单价"):
                 cell.alignment = Alignment(horizontal="right")
+            if kind != "meta" and field == "数量" and isinstance(cell.value, (int, float)):
+                cell.number_format = "0"
+            if (
+                kind != "meta"
+                and field in ("单价", "含税单价", "用户价格")
+                and isinstance(cell.value, (int, float))
+            ):
+                cell.number_format = "0.00"
 
     last = max(1, ws.max_row)
     ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last}"
@@ -1260,9 +1300,11 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "",
         *period_lines,
         "一、预处理",
-        "1. 订单：新增「价格合计」= 数量 × 用户价格；在「用户」后新增「E率」=(价格/1.13/E价)-1；按型号、交货日期升序",
-        "2. 发票：新增「含税单价」= 单价 × 1.13；按规格型号、开票日期升序",
-        "3. 配对前排除（不删除）：发票数量为负，或发票状态含「已红冲」→ 状态「不参与比对」，仍输出到结果",
+        "1. 订单：新增「价格合计」= 数量 × 用户价格；「E率」= round(((价格/1.13/E价)-1)×100) 整数百分比；交货日期/接单日期仅保留年月日；按型号、交货日期升序",
+        "2. 发票：数量/单价由文本转数字（数量取整、单价保留2位小数）；新增「含税单价」= 单价 × 1.13；"
+        "开票日期仅保留年月日；按规格型号、开票日期升序",
+        "3. 配对前排除（不删除）：发票数量为负，或发票状态含「已红冲-全额」→ 状态「不参与比对」，仍输出；"
+        "「已红冲-部分」仍参与比对",
         "",
         "二、匹配键与约束",
         "1. 关联键：订单.型号 ↔ 发票.规格型号（去全部空白后 casefold，大小写与空格不敏感）",
@@ -1290,11 +1332,11 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "筛选用法：在「匹配明细」对「核实优先级」筛选「高」或「中」",
         "",
         "四-附、匹配明细列序（取消成对对照区；其余列保留但默认隐藏）",
-        "1. 发票可见：数电发票号码、开票日期、货物或应税劳务名称、规格型号、数量、含税单价",
-        "2. 发票其余列（默认隐藏，可取消隐藏查看）",
-        "3. 订单可见：订单号、型号、数量、用户价格、交货日期、E率",
-        "4. 订单其余列（默认隐藏）",
-        "5. 匹配结果：核实优先级、匹配状态、问题偏向、是否需人工核对、异议原因",
+        "1. 发票列序：数电发票号码、货物或应税劳务名称、规格型号、数量、含税单价、"
+        "序号/代码/号码/单位/单价/金额/税率/税额/价税合计/状态/购销方/备注（隐藏）、开票日期",
+        "2. 订单列序：交货日期、订单号、型号、数量、用户价格、E率、"
+        "价格合计/价格/E价/接单日期/订单状态/用户（隐藏）、战略标记、统计对象",
+        "3. 匹配结果列：核实优先级、匹配状态、问题偏向、是否需人工核对、异议原因",
         "明细排序：同型号内按发生日升序——有开票日用开票日，仅订单则用交货日（再退接单日），避免未开票订单沉底",
         "",
         "五、问题偏向（三选一，仅未配相关行填写）",
@@ -1329,6 +1371,10 @@ def write_preprocessed_sheets(wb, orders, invoices):
             cell = ws_o.cell(ri, ci, fmt_cell(o.get(col)))
             cell.fill = ORDER_FILL
             cell.border = THIN
+            if col in ("交货日期", "接单日期") and isinstance(cell.value, (datetime, date)):
+                cell.number_format = "yyyy-mm-dd"
+            if col == "E率" and isinstance(cell.value, (int, float)):
+                cell.number_format = '0"%"'
     _autosize(ws_o)
 
     ws_i = wb.create_sheet("预处理-发票", 4)
@@ -1368,6 +1414,12 @@ def write_preprocessed_sheets(wb, orders, invoices):
         for ci, col in enumerate(inv_cols, start=1):
             cell = ws_i.cell(ri, ci, fmt_cell(inv.get(col)))
             cell.border = THIN
+            if col == "开票日期" and isinstance(cell.value, (datetime, date)):
+                cell.number_format = "yyyy-mm-dd"
+            if col == "数量" and isinstance(cell.value, (int, float)):
+                cell.number_format = "0"
+            if col in ("单价", "含税单价") and isinstance(cell.value, (int, float)):
+                cell.number_format = "0.00"
     _autosize(ws_i, max_width=24)
 
 
@@ -1434,7 +1486,11 @@ def save_preprocessed_sources(orders, invoices, out_dir: Path):
     write_header(ws, inv_cols)
     for ri, inv in enumerate(invoices, start=2):
         for ci, col in enumerate(inv_cols, start=1):
-            ws.cell(ri, ci, fmt_cell(inv.get(col)))
+            cell = ws.cell(ri, ci, fmt_cell(inv.get(col)))
+            if col == "数量" and isinstance(cell.value, (int, float)):
+                cell.number_format = "0"
+            if col in ("单价", "含税单价") and isinstance(cell.value, (int, float)):
+                cell.number_format = "0.00"
     out_i = out_dir / "发票数据_预处理.xlsx"
     wb.save(out_i)
     return out_o, out_i

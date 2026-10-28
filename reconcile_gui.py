@@ -22,7 +22,7 @@ from reconcile import (
 
 APP_TITLE = "订单发票比对工具"
 DEFAULT_RESULT_NAME = "比对结果.xlsx"
-APP_VERSION = "Pro3.0"
+APP_VERSION = "Pro4.0"
 
 FORMAT_HELP_TEXT = """【订单数据】
 首行表头须包含以下列（可有多余列，列顺序不限）：
