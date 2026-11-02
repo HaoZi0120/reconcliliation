@@ -219,6 +219,11 @@
             font-size: 11px; color: var(--muted); display: flex; align-items: center; justify-content: space-between;
         }
         .footer-left { display: flex; align-items: center; gap: 16px; }
+        .footer-right { display: flex; align-items: center; gap: 12px; }
+        .footer-mark {
+            font-size: 10px; letter-spacing: 0.08em; color: #CBD5E1;
+            user-select: none; pointer-events: none; opacity: 0.55;
+        }
         .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--emerald-500); display: inline-block; animation: pulse 1.5s infinite; }
         .dot.busy { background: var(--amber-400); }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
@@ -255,7 +260,7 @@
         <div class="brand">
             <div class="brand-icon">¥</div>
             <span class="brand-title">订单发票比对工具</span>
-            <span id="appVersion" class="badge">Pro4.0</span>
+            <span id="appVersion" class="badge">Pro5.0</span>
         </div>
         <div style="font-size:10px;color:var(--slate-400)">Fluent UI</div>
     </header>
@@ -389,7 +394,10 @@
             <span style="color:var(--slate-300)">|</span>
             <span>编码: UTF-8</span>
         </div>
-        <div>Microsoft Windows 11 Fluent UI</div>
+        <div class="footer-right">
+            <span>Microsoft Windows 11 Fluent UI</span>
+            <span class="footer-mark" title="">YNZZH</span>
+        </div>
     </footer>
 
     <div id="helpModal" class="modal">

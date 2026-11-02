@@ -4,14 +4,14 @@
 规则锁定：
 1. 交货日期 < 开票日期（严格早于）
 2. 型号匹配键：去全部空白后 casefold（大小写、空格不敏感）；展示仍用原文
-3. 完全匹配：匹配键同 + 日期合法 + 数量相等 + |用户价格-含税单价|<=0.02
+3. 已核销（原完全匹配）：匹配键同 + 日期合法 + 数量相等 + |用户价格-含税单价|<=0.02
 4. 已配对但价格不合格细分：实际售价高于申请价格 / 实际售价低于申请价格 / 价格缺失（均需人工）
 5. 业务约束：含税单价不得高于用户价格；超申请用 PRICE_OVER，低于申请用 PRICE_UNDER
-6. 多候选 FIFO 成功：算完全匹配，写 MULTI_CAND
-7. 原文仅大小写/空格差异：写 CASE_DIFF / SPACE_DIFF，仍可完全匹配
+6. 多候选 FIFO 成功：算已核销，写 MULTI_CAND
+7. 原文仅大小写/空格差异：写 CASE_DIFF / SPACE_DIFF，仍可已核销
 8. 订单预处理：用户后增加「E率」=(价格/1.13/E价)-1
 9. 发票数量为负或状态为「已红冲-全额」：不参与比对但保留数据；「已红冲-部分」仍参与比对
-10. 订单侧底色浅蓝；需人工核对整行浅黄；数据异常浅红
+10. 发票列绿底、订单列蓝底；核实高时发票/订单红字、比对结果列浅橙底；数据异常仅比对结果列浅红
 """
 
 from __future__ import annotations
@@ -40,9 +40,11 @@ INVOICE_REQUIRED_HEADERS = {"开票日期", "规格型号", "数量", "单价"}
 EXCLUDED_INVOICE_STATUS_FULL_FLUSH = "已红冲-全额"
 PRICE_TOLERANCE = 0.02
 # 已配对但价格相关的细分状态（均 need_manual=True）
+STATUS_MATCHED = "已核销"  # 原「完全匹配」
 STATUS_PRICE_OVER = "实际售价高于申请价格"
 STATUS_PRICE_UNDER = "实际售价低于申请价格"
 STATUS_PRICE_MISSING = "价格缺失"
+NEED_EXPLAIN_YES = "需解释"
 
 # 未配 / 账期相关状态
 STATUS_GRACE_ORDER = "账期内待开票"
@@ -52,6 +54,10 @@ STATUS_INV_NO_ORDER = "发票无订单"
 STATUS_SAME_DATE = "同型号开票早于发货"
 STATUS_SAME_QTY = "同型号数量无法对齐"
 STATUS_SAME_OCCUPIED = "同型号行已被其他票/单占用"
+# 匹配状态需红字加粗
+STATUS_RED_BOLD = frozenset(
+    {STATUS_PRICE_OVER, STATUS_ORDER_NO_INV, STATUS_INV_NO_ORDER}
+)
 
 BIAS_ORDER = "订单未开票"
 BIAS_INV = "发票无订单"
@@ -85,6 +91,11 @@ def verify_priority_for(status: str) -> str:
     if status in VERIFY_PRIORITY_MID_STATUSES:
         return VERIFY_MID
     return VERIFY_NONE
+
+
+def need_explain_for(verify_priority: str) -> str:
+    """核实优先级为「高」时填「需解释」，否则为空。"""
+    return NEED_EXPLAIN_YES if verify_priority == VERIFY_HIGH else ""
 
 
 @dataclass
@@ -170,25 +181,31 @@ MANUAL_FILL = PatternFill("solid", fgColor="FFF2CC")  # 浅黄（汇总提示等
 ERROR_FILL = PatternFill("solid", fgColor="FCE4EC")  # 浅红 数据异常行
 HEADER_FILL = PatternFill("solid", fgColor="D9E2F3")
 # 匹配明细视觉规范
-FILL_VERIFY_HIGH = PatternFill("solid", fgColor="FCE4D6")  # 浅橙 核实=高
-FILL_VERIFY_MID = PatternFill("solid", fgColor="FFF2CC")  # 浅黄 核实=中
-FILL_ZONE_A_HEADER = PatternFill("solid", fgColor="5B2C6F")  # A 导航深紫
+FILL_ZONE_A_HEADER = PatternFill("solid", fgColor="5B2C6F")  # 匹配结果表头深紫
 FILL_ZONE_B_INV_HEADER = PatternFill("solid", fgColor="70AD47")
 FILL_ZONE_B_ORD_HEADER = PatternFill("solid", fgColor="5B9BD5")
 FILL_ZONE_C_HEADER = PatternFill("solid", fgColor="A9D08E")
 FILL_ZONE_D_HEADER = PatternFill("solid", fgColor="9DC3E6")
-FILL_ZONE_A_DATA = PatternFill("solid", fgColor="F5EEF8")  # A 导航浅紫
-FILL_ZONE_B_INV_DATA = PatternFill("solid", fgColor="E2EFDA")  # B 对照发票侧
-FILL_ZONE_B_ORD_DATA = PatternFill("solid", fgColor="DDEBF7")  # B 对照订单侧
-FILL_ZONE_C_DATA = PatternFill("solid", fgColor="F2F9EC")  # C 发票专区（更浅绿）
-FILL_ZONE_D_DATA = PatternFill("solid", fgColor="EEF5FB")  # D 订单专区（更浅蓝）
+FILL_ZONE_A_DATA = PatternFill("solid", fgColor="F5EEF8")  # 匹配结果默认浅紫
+FILL_META_HIGH = PatternFill("solid", fgColor="FCE4D6")  # 核实=高：仅比对结果列浅橙底
+FILL_INV_DATA = PatternFill("solid", fgColor="E2EFDA")  # 发票列统一浅绿
+FILL_ORD_DATA = PatternFill("solid", fgColor="DDEBF7")  # 订单列统一浅蓝
+# 兼容旧名（隐藏列与可见列数据底色已统一）
+FILL_ZONE_B_INV_DATA = FILL_INV_DATA
+FILL_ZONE_B_ORD_DATA = FILL_ORD_DATA
+FILL_ZONE_C_DATA = FILL_INV_DATA
+FILL_ZONE_D_DATA = FILL_ORD_DATA
 FONT_HEADER_WHITE = Font(bold=True, color="FFFFFF")
 FONT_HEADER_DARK = Font(bold=True, color="1F4E79")
-FONT_VERIFY_HIGH = Font(bold=True, color="C65911")
+FONT_VERIFY_HIGH = Font(bold=True, color="C00000")  # 核实=高：红字
 FONT_VERIFY_MID = Font(bold=True, color="833C0C")
+FONT_HIGH_INV_ORD = Font(color="C00000")  # 核实=高：发票/订单列红字
+FONT_EXPLAIN = Font(bold=True, color="C65911")  # 「需解释」橘色加粗
 FONT_STATUS_OVER = Font(bold=True, color="C00000")
 FONT_BIAS_OTHER = Font(color="7030A0")
 FONT_REASON = Font(color="595959", size=9)
+FILL_MODEL_SUMMARY = PatternFill("solid", fgColor="D9D9D9")  # 型号汇总行浅灰底
+FONT_MODEL_SUMMARY = Font(bold=True, color="000000")
 THIN = Border(
     left=Side(style="thin", color="B0B0B0"),
     right=Side(style="thin", color="B0B0B0"),
@@ -760,7 +777,7 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
             status = STATUS_PRICE_UNDER
             need_manual = True
         else:
-            status = "完全匹配"
+            status = STATUS_MATCHED
             need_manual = False
 
         results.append(
@@ -856,7 +873,14 @@ INVOICE_OUT_COLS = [
     "开票日期",
 ]
 
-META_COLS = ["核实优先级", "匹配状态", "问题偏向", "是否需人工核对", "异议原因"]
+META_COLS = [
+    "核实优先级",
+    "是否需要解释",
+    "匹配状态",
+    "问题偏向",
+    "是否需人工核对",
+    "异议原因",
+]
 
 # 匹配明细：按下列显式顺序排布；HIDDEN 集合内的列写入但默认隐藏
 DETAIL_INVOICE_COLS = list(INVOICE_OUT_COLS)
@@ -969,11 +993,23 @@ def write_header(ws, headers, start_col=1):
 
 
 def result_cell_value(r, kind, field):
+    if r.get("_summary"):
+        if kind == "发票" and field == "数电发票号码":
+            return "汇总"
+        if kind == "发票" and field == "规格型号":
+            return r.get("summary_model") or ""
+        if kind == "发票" and field == "数量":
+            return r.get("summary_inv_qty")
+        if kind == "订单" and field == "数量":
+            return r.get("summary_ord_qty")
+        return None
     if kind == "meta":
         if field == "匹配状态":
             return r["status"]
         if field == "核实优先级":
             return r.get("verify_priority") or ""
+        if field == "是否需要解释":
+            return need_explain_for(r.get("verify_priority") or "")
         if field == "是否需人工核对":
             return "是" if r["need_manual"] else "否"
         if field == "问题偏向":
@@ -1003,16 +1039,11 @@ def _zone_header_style(col_idx: int):
 
 
 def _zone_data_fill(col_idx: int):
-    if col_idx in ZONE_INV_VISIBLE_COLS:
-        return FILL_ZONE_B_INV_DATA
-    if col_idx in ZONE_INV_HIDDEN_COLS:
-        return FILL_ZONE_C_DATA
-    if col_idx in ZONE_ORD_VISIBLE_COLS:
-        return FILL_ZONE_B_ORD_DATA
-    if col_idx in ZONE_ORD_HIDDEN_COLS:
-        return FILL_ZONE_D_DATA
-    if col_idx in ZONE_META_VISIBLE_COLS or col_idx in ZONE_META_HIDDEN_COLS:
-        return FILL_ZONE_A_DATA
+    """发票统一绿底、订单统一蓝底、匹配结果默认浅紫（核实高时另涂浅橙底）。"""
+    if col_idx in ZONE_INV_VISIBLE_COLS or col_idx in ZONE_INV_HIDDEN_COLS:
+        return FILL_INV_DATA
+    if col_idx in ZONE_ORD_VISIBLE_COLS or col_idx in ZONE_ORD_HIDDEN_COLS:
+        return FILL_ORD_DATA
     return FILL_ZONE_A_DATA
 
 
@@ -1028,24 +1059,34 @@ def write_detail_header(ws):
 
 
 def write_result_rows(ws, rows):
-    """写入匹配明细样式行（含分区表头、核实优先级行色、关键字体色）。"""
+    """写入匹配明细样式行。
+
+    发票列恒绿底、订单列恒蓝底（不整行黄/橙覆盖）；
+    核实优先级「高」：发票/订单列红字，比对结果列浅橙底。
+    """
     write_detail_header(ws)
     n_cols = len(RESULT_COLUMNS)
     idx_verify = META_COL_INDEX.get("核实优先级")
+    idx_explain = META_COL_INDEX.get("是否需要解释")
     idx_status = META_COL_INDEX.get("匹配状态")
     idx_bias = META_COL_INDEX.get("问题偏向")
     idx_reason = META_COL_INDEX.get("异议原因")
 
     for ri, r in enumerate(rows, start=2):
+        if r.get("_summary"):
+            for ci, (kind, field, _) in enumerate(RESULT_COLUMNS, start=1):
+                cell = ws.cell(ri, ci, result_cell_value(r, kind, field))
+                cell.border = THIN
+                cell.fill = FILL_MODEL_SUMMARY
+                cell.font = FONT_MODEL_SUMMARY
+                if kind != "meta" and field == "数量" and isinstance(cell.value, (int, float)):
+                    cell.number_format = "0"
+                    cell.alignment = Alignment(horizontal="right")
+            continue
+
         vp = r.get("verify_priority") or ""
-        if r["status"] == "数据异常":
-            row_fill = ERROR_FILL
-        elif vp == VERIFY_HIGH:
-            row_fill = FILL_VERIFY_HIGH
-        elif vp == VERIFY_MID:
-            row_fill = FILL_VERIFY_MID
-        else:
-            row_fill = None
+        is_high = vp == VERIFY_HIGH
+        is_error = r["status"] == "数据异常"
 
         for ci, (kind, field, _) in enumerate(RESULT_COLUMNS, start=1):
             cell = ws.cell(ri, ci, result_cell_value(r, kind, field))
@@ -1055,19 +1096,27 @@ def write_result_rows(ws, rows):
             if kind == "订单" and field == "E率" and isinstance(cell.value, (int, float)):
                 cell.number_format = '0"%"'
 
-            if row_fill is not None:
-                cell.fill = row_fill
+            if kind == "发票":
+                cell.fill = FILL_INV_DATA
+            elif kind == "订单":
+                cell.fill = FILL_ORD_DATA
+            elif is_high:
+                cell.fill = FILL_META_HIGH
+            elif is_error:
+                cell.fill = ERROR_FILL
             else:
-                zf = _zone_data_fill(ci)
-                if zf is not None:
-                    cell.fill = zf
+                cell.fill = FILL_ZONE_A_DATA
 
+            if is_high and kind in ("发票", "订单"):
+                cell.font = FONT_HIGH_INV_ORD
             if idx_verify and ci == idx_verify:
-                if vp == VERIFY_HIGH:
+                if is_high:
                     cell.font = FONT_VERIFY_HIGH
                 elif vp == VERIFY_MID:
                     cell.font = FONT_VERIFY_MID
-            elif idx_status and ci == idx_status and r["status"] == STATUS_PRICE_OVER:
+            elif idx_explain and ci == idx_explain and cell.value == NEED_EXPLAIN_YES:
+                cell.font = FONT_EXPLAIN
+            elif idx_status and ci == idx_status and r["status"] in STATUS_RED_BOLD:
                 cell.font = FONT_STATUS_OVER
             elif idx_bias and ci == idx_bias and (r.get("bias") or "") == BIAS_OTHER:
                 cell.font = FONT_BIAS_OTHER
@@ -1126,26 +1175,89 @@ def _row_secondary_datetime(r) -> datetime:
     return datetime.max
 
 
+def _detail_model_key(r) -> str:
+    o = r.get("order")
+    i = r.get("invoice")
+    return (
+        (o.get("_model_key") if o else None)
+        or (i.get("_model_key") if i else None)
+        or ""
+    )
+
+
+def _detail_model_label(rows) -> str:
+    """汇总行展示用型号原文：优先发票规格型号，其次订单型号。"""
+    for r in rows:
+        inv = r.get("invoice")
+        if inv and inv.get("规格型号") not in (None, ""):
+            return str(inv.get("规格型号"))
+    for r in rows:
+        order = r.get("order")
+        if order and order.get("型号") not in (None, ""):
+            return str(order.get("型号"))
+    return _detail_model_key(rows[0]) if rows else ""
+
+
+def make_model_summary_row(group_rows):
+    """每个型号组结束后的汇总行（深灰底，仅填数电票号/规格型号/双方数量）。"""
+    inv_qty = 0.0
+    ord_qty = 0.0
+    has_inv = False
+    has_ord = False
+    for r in group_rows:
+        order = r.get("order")
+        inv = r.get("invoice")
+        if order and order.get("_qty") is not None:
+            ord_qty += float(order["_qty"])
+            has_ord = True
+        if inv and inv.get("_qty") is not None:
+            inv_qty += float(inv["_qty"])
+            has_inv = True
+    return {
+        "_summary": True,
+        "summary_model": _detail_model_label(group_rows),
+        "summary_inv_qty": int(round(inv_qty)) if has_inv else None,
+        "summary_ord_qty": int(round(ord_qty)) if has_ord else None,
+        "order": None,
+        "invoice": None,
+        "status": "",
+        "need_manual": False,
+        "reasons": [],
+        "bias": "",
+        "verify_priority": "",
+    }
+
+
+def with_model_summary_rows(sorted_rows):
+    """在每个型号组之后插入一行汇总。"""
+    out = []
+    i = 0
+    n = len(sorted_rows)
+    while i < n:
+        key = _detail_model_key(sorted_rows[i])
+        group = []
+        while i < n and _detail_model_key(sorted_rows[i]) == key:
+            group.append(sorted_rows[i])
+            i += 1
+        out.extend(group)
+        out.append(make_model_summary_row(group))
+    return out
+
+
 def write_detail_sheet(wb, results):
     ws = wb.create_sheet("匹配明细", 0)
 
     def sort_key(r):
         """相同型号聚拢；组内按发生日时间线升序（有开票日用开票日，否则交货日）。"""
-        o = r["order"]
-        i = r["invoice"]
-        group_model = (
-            (o.get("_model_key") if o else None)
-            or (i.get("_model_key") if i else None)
-            or ""
-        )
         return (
-            group_model,
+            _detail_model_key(r),
             _row_event_datetime(r),
             _row_secondary_datetime(r),
             r.get("status") or "",
         )
 
-    write_result_rows(ws, sorted(results, key=sort_key))
+    sorted_rows = sorted(results, key=sort_key)
+    write_result_rows(ws, with_model_summary_rows(sorted_rows))
     return ws
 
 
@@ -1158,7 +1270,7 @@ def write_summary_sheet(wb, results, orders, invoices, so, si):
         "订单数量合计",
         "发票数量合计",
         "数量差(订-票)",
-        "完全匹配",
+        "已核销",
         "实际售价高于申请价格",
         "实际售价低于申请价格",
         "价格缺失",
@@ -1242,7 +1354,7 @@ def write_summary_sheet(wb, results, orders, invoices, so, si):
             oq,
             iq,
             oq - iq,
-            stats[m]["完全匹配"],
+            stats[m][STATUS_MATCHED],
             stats[m][STATUS_PRICE_OVER],
             stats[m][STATUS_PRICE_UNDER],
             stats[m][STATUS_PRICE_MISSING],
@@ -1315,7 +1427,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "6. 账期：起始日+N天-1天=期初豁免截止；结束日-N天+1天=期末豁免起始",
         "",
         "三、状态定义",
-        "完全匹配：日期合法 + 数量相等 + |用户价格-含税单价|≤容差",
+        "已核销：日期合法 + 数量相等 + |用户价格-含税单价|≤容差",
         "实际售价高于申请价格 / 实际售价低于申请价格 / 价格缺失：已配对价格问题 → 需人工",
         "账期内待开票：订单未配上且交货日≥期末豁免起始日 → 不强制人工",
         "账期内无订单：发票未配上且开票日≤期初豁免截止日 → 不强制人工",
@@ -1328,7 +1440,8 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "四、核实优先级（筛选用：找数据提供方沟通）",
         "高：实际售价高于申请价格；订单未开票；发票无订单；同型号开票早于发货；同型号数量无法对齐；同型号行已被其他票/单占用",
         "中：数据异常；价格缺失",
-        "空（不沟通）：完全匹配；账期内待开票；账期内无订单；不参与比对；实际售价低于申请价格",
+        "空（不沟通）：已核销；账期内待开票；账期内无订单；不参与比对；实际售价低于申请价格",
+        "核实优先级为「高」时，「是否需要解释」填「需解释」",
         "筛选用法：在「匹配明细」对「核实优先级」筛选「高」或「中」",
         "",
         "四-附、匹配明细列序（取消成对对照区；其余列保留但默认隐藏）",
@@ -1336,7 +1449,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "序号/代码/号码/单位/单价/金额/税率/税额/价税合计/状态/购销方/备注（隐藏）、开票日期",
         "2. 订单列序：交货日期、订单号、型号、数量、用户价格、E率、"
         "价格合计/价格/E价/接单日期/订单状态/用户（隐藏）、战略标记、统计对象",
-        "3. 匹配结果列：核实优先级、匹配状态、问题偏向、是否需人工核对、异议原因",
+        "3. 匹配结果列：核实优先级、是否需要解释、匹配状态、问题偏向、是否需人工核对、异议原因",
         "明细排序：同型号内按发生日升序——有开票日用开票日，仅订单则用交货日（再退接单日），避免未开票订单沉底",
         "",
         "五、问题偏向（三选一，仅未配相关行填写）",
@@ -1346,9 +1459,13 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "",
         "六、匹配明细颜色规则",
         "【表头】发票可见=绿底白字；发票其余=浅绿底深字；订单可见=蓝底白字；订单其余=浅蓝底深字；匹配结果=深紫底白字",
-        "【行底】核实优先级「高」=浅橙整行；「中」=浅黄整行；数据异常=浅红整行（优先于高/中）；空优先级=不铺整行色，按分区浅底",
-        "【字体】核实「高」=橙红加粗；核实「中」=褐色加粗；匹配状态「实际售价高于申请价格」=红色加粗；问题偏向「其他」=灰紫字；异议原因=灰色小字",
-        "【不做】完全匹配不用绿色字；不为每种匹配状态单独设行色",
+        "【数据底色】发票列统一浅绿；订单列统一浅蓝；匹配结果默认浅紫；发票/订单列不做黄/橙整行覆盖",
+        "【核实高】发票/订单列=红字+原绿/蓝底；比对结果列=浅橙底；核实优先级=红字加粗；「需解释」=橘色加粗",
+        "【型号汇总行】每型号组末：数电发票号码=汇总，规格型号=该型号，发票数量/订单数量=组内合计；浅灰底黑字加粗",
+        "【其他】数据异常仅比对结果列浅红底；核实「中」仅核实优先级褐字加粗；"
+        "匹配状态「实际售价高于申请价格」「订单未开票」「发票无订单」=红色加粗；"
+        "问题偏向「其他」=灰紫字；异议原因=灰色小字",
+        "【不做】已核销不用绿色字；不为每种匹配状态单独设行色",
         "",
         "七、异议原因代码（节选）",
         "PRICE_OVER / PRICE_UNDER / MULTI_CAND / CASE_DIFF / SPACE_DIFF",
