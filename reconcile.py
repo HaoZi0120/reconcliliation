@@ -10,7 +10,7 @@
 6. 多候选 FIFO 成功：算已核销，写 MULTI_CAND
 7. 原文仅大小写/空格差异：写 CASE_DIFF / SPACE_DIFF，仍可已核销
 8. 订单预处理：用户后增加「E率」=(价格/1.13/E价)-1
-9. 发票数量为负或状态为「已红冲-全额」：不参与比对但保留数据；「已红冲-部分」仍参与比对
+9. 发票数量为负或状态为「已红冲-全额」、订单号以S开头：不参与比对但保留数据；「已红冲-部分」仍参与比对
 10. 发票列绿底、订单列蓝底；核实高时发票/订单红字、比对结果列浅橙底；数据异常仅比对结果列浅红
 """
 
@@ -332,8 +332,25 @@ def read_sheet_rows(path: Path, sheet_name=None, required_headers=None):
     return headers, data, used_sheet
 
 
+def order_exclude_reasons(row) -> list[str]:
+    """配对前排除规则（数据仍保留，仅不参与匹配）。
+
+    订单号去掉前导空白后若以 S/s 开头，则不参与比对。
+    """
+    reasons = []
+    ono = row.get("订单号")
+    if ono is None or str(ono).strip() == "":
+        return reasons
+    s = str(ono).lstrip()
+    if s and s[0].casefold() == "s":
+        reasons.append(
+            f"EXCL_ORDER_NO_S:订单号以S开头（实际为「{str(ono).strip()}」），不参与比对"
+        )
+    return reasons
+
+
 def preprocess_orders(rows):
-    """返回带价格合计的订单列表（已排序）。"""
+    """返回带价格合计的订单列表（已排序）；标记不参与比对的行。"""
     out = []
     for idx, r in enumerate(rows):
         row = dict(r)
@@ -363,6 +380,7 @@ def preprocess_orders(rows):
         row["_ship_dt"] = (
             datetime(ship_d.year, ship_d.month, ship_d.day) if ship_d else None
         )
+        row["_exclude_reasons"] = order_exclude_reasons(row)
         out.append(row)
     out.sort(
         key=lambda x: (
@@ -430,20 +448,32 @@ def preprocess_invoices(rows):
     return out
 
 
-def split_invoices_for_match(invoices):
+def split_for_match(rows):
     """拆成参与比对 / 不参与比对（后者仍输出到结果）。"""
-    active = [i for i in invoices if not i.get("_exclude_reasons")]
-    excluded = [i for i in invoices if i.get("_exclude_reasons")]
+    active = [r for r in rows if not r.get("_exclude_reasons")]
+    excluded = [r for r in rows if r.get("_exclude_reasons")]
     return active, excluded
+
+
+def split_invoices_for_match(invoices):
+    return split_for_match(invoices)
+
+
+def split_orders_for_match(orders):
+    return split_for_match(orders)
 
 
 def model_qty_totals(orders, invoices):
     so = defaultdict(float)
     si = defaultdict(float)
     for o in orders:
+        if o.get("_exclude_reasons"):
+            continue
         if o["_model_key"] and o["_qty"] is not None:
             so[o["_model_key"]] += o["_qty"]
     for i in invoices:
+        if i.get("_exclude_reasons"):
+            continue
         if i["_model_key"] and i["_qty"] is not None:
             si[i["_model_key"]] += i["_qty"]
     return so, si
@@ -694,14 +724,15 @@ def make_result_row(order, invoice, status, need_manual, reasons, bias=None, **e
 
 
 def reconcile(orders, invoices, period: PeriodConfig | None = None):
-    """orders 全量；invoices 可为全量（内部只对未排除行做匹配）。"""
+    """orders/invoices 可为全量（内部只对未排除行做匹配；排除行仍输出）。"""
+    active_orders, excluded_orders = split_orders_for_match(orders)
     active_invoices, excluded_invoices = split_invoices_for_match(invoices)
-    so, si = model_qty_totals(orders, active_invoices)
-    used_inv = set()  # 已成功配对的发票下标
-    matched_ord = set()  # 已成功配对的订单下标（用于发票侧「占用」判断）
+    so, si = model_qty_totals(active_orders, active_invoices)
+    used_inv = set()  # 已成功配对的发票下标（相对 active_invoices）
+    matched_ord = set()  # 已成功配对的订单下标（相对 active_orders）
     results = []
 
-    for oi, order in enumerate(orders):
+    for oi, order in enumerate(active_orders):
         reasons = []
 
         if not order["_model_key"] or order["_qty"] is None or order["_ship_dt"] is None:
@@ -814,9 +845,21 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
             )
             continue
         status, need, rs, bias = classify_unmatched_invoice(
-            inv, orders, so, si, matched_ord, period
+            inv, active_orders, so, si, matched_ord, period
         )
         results.append(make_result_row(None, inv, status, need, rs, bias=bias))
+
+    for order in excluded_orders:
+        results.append(
+            make_result_row(
+                order,
+                None,
+                "不参与比对",
+                False,
+                list(order.get("_exclude_reasons") or []),
+                bias="",
+            )
+        )
 
     for inv in excluded_invoices:
         results.append(
@@ -1415,7 +1458,8 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "1. 订单：新增「价格合计」= 数量 × 用户价格；「E率」= round(((价格/1.13/E价)-1)×100) 整数百分比；交货日期/接单日期仅保留年月日；按型号、交货日期升序",
         "2. 发票：数量/单价由文本转数字（数量取整、单价保留2位小数）；新增「含税单价」= 单价 × 1.13；"
         "开票日期仅保留年月日；按规格型号、开票日期升序",
-        "3. 配对前排除（不删除）：发票数量为负，或发票状态含「已红冲-全额」→ 状态「不参与比对」，仍输出；"
+        "3. 配对前排除（不删除）：发票数量为负，或发票状态含「已红冲-全额」，"
+        "或订单号去前导空白后以S/s开头 → 状态「不参与比对」，仍输出；"
         "「已红冲-部分」仍参与比对",
         "",
         "二、匹配键与约束",
@@ -1470,7 +1514,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "七、异议原因代码（节选）",
         "PRICE_OVER / PRICE_UNDER / MULTI_CAND / CASE_DIFF / SPACE_DIFF",
         "GRACE_ORDER / GRACE_INVOICE / OCCUPIED / QTY_MISALIGN / DATE_ORDER",
-        "EXCL_NEG_QTY / EXCL_RED_FLUSH / MODEL_QTY_GAP / BAD_FIELD",
+        "EXCL_NEG_QTY / EXCL_RED_FLUSH / EXCL_ORDER_NO_S / MODEL_QTY_GAP / BAD_FIELD",
     ]
     for i, line in enumerate(lines, start=1):
         ws.cell(i, 1, line)
@@ -1665,7 +1709,8 @@ def run_reconcile(
     _progress(35, "订单预处理完成")
     _progress(38, "正在预处理发票…")
     invoices = preprocess_invoices(inv_raw)
-    _active, excluded_invoices = split_invoices_for_match(invoices)
+    _active_orders, excluded_orders = split_orders_for_match(orders)
+    _active_inv, excluded_invoices = split_invoices_for_match(invoices)
     _progress(45, "发票预处理完成")
 
     period_inferred = False
@@ -1706,6 +1751,7 @@ def run_reconcile(
     stats = {
         "order_rows": len(orders),
         "invoice_rows": len(invoices),
+        "order_excluded_rows": len(excluded_orders),
         "invoice_excluded_rows": len(excluded_invoices),
         "result_rows": len(results),
         "status_counts": status_counts,
