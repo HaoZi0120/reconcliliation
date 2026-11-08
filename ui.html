@@ -142,6 +142,15 @@
             background: var(--slate-100); padding: 2px 4px; border-radius: 4px; margin: 0 1px;
         }
         .row { display: flex; align-items: center; gap: 8px; }
+        .drop-zone {
+            border: 1.5px dashed transparent; border-radius: 14px;
+            padding: 8px; margin: 0 -8px 8px; transition: border-color .15s ease, background .15s ease;
+        }
+        .drop-zone:last-of-type { margin-bottom: 0; }
+        .drop-zone.drop-active {
+            border-color: var(--primary); background: rgba(37, 99, 235, 0.06);
+        }
+        .drop-zone.drop-active .input { border-color: var(--primary); background: #fff; }
         .input-wrap { position: relative; flex: 1; }
         .input-wrap .ico {
             position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
@@ -228,6 +237,28 @@
         .dot.busy { background: var(--amber-400); }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
+        .ui-lock {
+            display: none; position: fixed; inset: 0; z-index: 200;
+            background: rgba(15, 23, 42, 0.42); backdrop-filter: blur(3px);
+            align-items: center; justify-content: center; padding: 16px;
+            cursor: wait; user-select: none;
+        }
+        .ui-lock.show { display: flex; }
+        .ui-lock-card {
+            background: #fff; border: 1px solid var(--border); border-radius: 14px;
+            padding: 20px 28px; min-width: 240px; max-width: 90vw;
+            box-shadow: 0 16px 40px rgba(0,0,0,0.18);
+            display: flex; flex-direction: column; align-items: center; gap: 12px;
+        }
+        .ui-lock-spinner {
+            width: 28px; height: 28px; border-radius: 50%;
+            border: 3px solid var(--slate-200); border-top-color: var(--primary);
+            animation: ui-spin 0.8s linear infinite;
+        }
+        @keyframes ui-spin { to { transform: rotate(360deg); } }
+        .ui-lock-text { font-size: 14px; font-weight: 600; color: var(--text); text-align: center; }
+        body.ui-locked { overflow: hidden; }
+
         .modal {
             display: none; position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,0.4);
             backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 16px;
@@ -253,6 +284,37 @@
         .ico-blue { color: #2563EB; }
         .ico-indigo { color: var(--indigo-600); }
         .ico-amber { color: var(--amber-500); }
+
+        .mode-row { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; }
+        .mode-opt {
+            display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+            color: var(--text); cursor: pointer; user-select: none;
+        }
+        .mode-opt input { accent-color: var(--primary); }
+        #strategicPanel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--slate-100); }
+        .stat-toolbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px;
+        }
+        .stat-list {
+            max-height: 148px; overflow-y: auto; border: 1px solid var(--border);
+            border-radius: 10px; padding: 8px 10px; background: #F8FAFC;
+            display: flex; flex-wrap: wrap; gap: 8px 14px;
+        }
+        .stat-item {
+            display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+            color: var(--slate-700); cursor: pointer; user-select: none;
+            background: #fff; border: 1px solid var(--slate-200); border-radius: 999px;
+            padding: 4px 10px;
+        }
+        .stat-item input { accent-color: var(--primary); }
+        .stat-placeholder { font-size: 12px; color: var(--muted); padding: 8px 2px; }
+        .stat-meta { margin-top: 8px; font-size: 12px; color: var(--muted); }
+        .btn-mini {
+            border: 1px solid var(--border); background: #fff; color: var(--slate-600);
+            border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+        }
+        .btn-mini:hover { background: var(--slate-100); }
     </style>
 </head>
 <body>
@@ -260,7 +322,7 @@
         <div class="brand">
             <div class="brand-icon">¥</div>
             <span class="brand-title">订单发票比对工具</span>
-            <span id="appVersion" class="badge">Pro6.0</span>
+            <span id="appVersion" class="badge">Pro7.6</span>
         </div>
         <div style="font-size:10px;color:var(--slate-400)">Fluent UI</div>
     </header>
@@ -281,48 +343,48 @@
         <section class="card">
             <div class="section-head">
                 <h2 class="section-title"><span class="bar"></span>数据源文件选择</h2>
-                <span class="hint">支持路径选择 (.xlsx, .xlsm)</span>
+                <span class="hint">可浏览 / 粘贴路径，也可将 .xlsx/.xlsm 拖到下方对应区域</span>
             </div>
 
-            <div class="field">
+            <div class="field drop-zone" id="orderDropZone" data-drop="order">
                 <div class="field-top">
                     <span class="field-label"><span class="ico-blue">▣</span> 订单数据文件</span>
                     <span class="chips">包含列: <span class="chip">交货日期</span>, <span class="chip">型号</span>, <span class="chip">数量</span>, <span class="chip">用户价格</span></span>
-                </div>
+                    </div>
                 <div class="row">
                     <div class="input-wrap">
                         <span class="ico">xlsx</span>
-                        <input class="input" type="text" id="orderFilePath" readonly placeholder="请选择订单 Excel 文件路径...">
+                        <input class="input" type="text" id="orderFilePath" placeholder="选择、粘贴或拖拽订单 Excel 到此处..." autocomplete="off">
                     </div>
-                    <button class="btn btn-browse" onclick="browseOrder()">浏览...</button>
+                    <button class="btn btn-browse" type="button" onclick="browseOrder()">浏览...</button>
                 </div>
-            </div>
+                    </div>
 
-            <div class="field">
+            <div class="field drop-zone" id="invoiceDropZone" data-drop="invoice">
                 <div class="field-top">
                     <span class="field-label"><span class="ico-indigo">▤</span> 发票数据文件</span>
                     <span class="chips">包含列: <span class="chip">开票日期</span>, <span class="chip">规格型号</span>, <span class="chip">数量</span>, <span class="chip">单价</span></span>
-                </div>
+                        </div>
                 <div class="row">
                     <div class="input-wrap">
                         <span class="ico">xlsx</span>
-                        <input class="input" type="text" id="invoiceFilePath" readonly placeholder="选择发票 Excel 后将自动推断查询周期...">
+                        <input class="input" type="text" id="invoiceFilePath" placeholder="选择、粘贴或拖拽发票 Excel 到此处；将自动分析周期..." autocomplete="off">
                     </div>
-                    <button class="btn btn-browse" onclick="browseInvoice()">浏览...</button>
+                    <button class="btn btn-browse" type="button" onclick="browseInvoice()">浏览...</button>
                 </div>
-            </div>
+                    </div>
 
             <div class="field">
                 <div class="field-top">
                     <span class="field-label"><span class="ico-amber">📁</span> 比对结果保存路径</span>
                     <span class="chips">导出为 .xlsx 表格</span>
-                </div>
+                        </div>
                 <div class="row">
                     <div class="input-wrap">
                         <span class="ico">dir</span>
-                        <input class="input" type="text" id="saveFilePath" readonly placeholder="请选择结果保存的目标文件夹及文件名...">
+                        <input class="input" type="text" id="saveFilePath" placeholder="请选择或填写结果保存路径及文件名..." autocomplete="off">
                     </div>
-                    <button class="btn btn-browse" onclick="browseOutput()">浏览...</button>
+                    <button class="btn btn-browse" type="button" onclick="browseOutput()">浏览...</button>
                 </div>
             </div>
         </section>
@@ -355,12 +417,42 @@
         </section>
 
         <section class="card">
+            <div class="section-head">
+                <h2 class="section-title"><span class="bar"></span>监察方式</h2>
+                <span class="hint">日常=全量；战略品=按统计对象筛选</span>
+            </div>
+            <div class="mode-row">
+                <label class="mode-opt">
+                    <input type="radio" name="monitorMode" value="daily" checked onchange="onModeChange()">
+                    日常监察
+                </label>
+                <label class="mode-opt">
+                    <input type="radio" name="monitorMode" value="strategic" onchange="onModeChange()">
+                    战略品监察
+                </label>
+            </div>
+            <div id="strategicPanel" style="display:none">
+                <div class="stat-toolbar">
+                    <span class="field-label">待监察统计对象 <span class="req">*</span></span>
+                    <span style="display:flex;gap:6px">
+                        <button type="button" class="btn-mini" onclick="selectAllStats(true)">全选</button>
+                        <button type="button" class="btn-mini" onclick="selectAllStats(false)">清空</button>
+                    </span>
+                </div>
+                <div id="statObjectList" class="stat-list">
+                    <div class="stat-placeholder">请先选择订单数据文件，以加载「统计对象」类别</div>
+                </div>
+                <div id="statObjectMeta" class="stat-meta">已选 0 类 · 将仅比对这些类别下的订单型号及同型号发票；未选中数据不写入结果</div>
+            </div>
+        </section>
+
+        <section class="card">
             <div class="actions">
                 <div class="action-btns">
                     <button id="btnStart" class="btn btn-primary" onclick="startProcess()">▶ 导出比对结果</button>
                     <button id="btnOpen" class="btn btn-open" onclick="openResult()" disabled>打开比对结果</button>
                     <button class="btn btn-exit" onclick="exitApp()">退出</button>
-                </div>
+                    </div>
                 <div class="progress-box">
                     <div class="progress-meta">
                         <span id="statusText" class="status">准备就绪</span>
@@ -400,6 +492,13 @@
         </div>
     </footer>
 
+    <div id="uiLock" class="ui-lock" aria-hidden="true">
+        <div class="ui-lock-card">
+            <div class="ui-lock-spinner" aria-hidden="true"></div>
+            <div id="uiLockText" class="ui-lock-text">请稍候…</div>
+        </div>
+    </div>
+
     <div id="helpModal" class="modal">
         <div class="modal-box">
             <div class="modal-head">
@@ -416,9 +515,95 @@
     <script>
         let isProcessing = false;
 
+        let uiLockCount = 0;
+        let lastAnalyzedInvoice = '';
+        let lastLoadedOrderForStats = '';
+        let activeDropKind = null;
+        const dropDepth = { order: 0, invoice: 0 };
+
         function api() {
             return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
         }
+
+        function isExcelPath(path) {
+            return /\.(xlsx|xlsm)$/i.test(String(path || '').trim());
+        }
+
+        function clearDropVisual() {
+            dropDepth.order = 0;
+            dropDepth.invoice = 0;
+            document.querySelectorAll('.drop-zone').forEach(el => el.classList.remove('drop-active'));
+        }
+
+        function setupDropZone(el, kind) {
+            if (!el) return;
+            // 注意：不要在 drop 上 stopPropagation，否则 pywebview document 监听收不到，
+            // Edge 也无法通过 FilesDropped 回传本地绝对路径。
+            el.addEventListener('dragenter', (e) => {
+                e.preventDefault();
+                dropDepth[kind] = (dropDepth[kind] || 0) + 1;
+                activeDropKind = kind;
+                el.classList.add('drop-active');
+            });
+            el.addEventListener('dragleave', (e) => {
+                e.preventDefault();
+                dropDepth[kind] = Math.max(0, (dropDepth[kind] || 0) - 1);
+                if (dropDepth[kind] === 0) el.classList.remove('drop-active');
+            });
+            el.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                activeDropKind = kind;
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+            });
+        }
+
+        async function applyOrderPath(path) {
+            path = String(path || '').trim();
+            if (!path) return;
+            document.getElementById('orderFilePath').value = path;
+            maybeSetOutput(path.replace(/[^\\\/]+$/, '比对结果.xlsx'));
+            addLog('INFO', '已载入订单文件：' + path);
+            if (getMonitorMode() === 'strategic') {
+                await refreshStatObjects(false);
+            } else {
+                lastLoadedOrderForStats = '';
+            }
+        }
+
+        async function applyInvoicePath(path, forceAnalyze) {
+            path = String(path || '').trim();
+            if (!path) return;
+            document.getElementById('invoiceFilePath').value = path;
+            maybeSetOutput(path.replace(/[^\\\/]+$/, '比对结果.xlsx'));
+            addLog('INFO', '已载入发票文件：' + path);
+            await analyzeInvoicePath(path, !!forceAnalyze);
+        }
+
+        function guessDropRoles(paths) {
+            const list = [...new Set(paths.map(p => String(p || '').trim()).filter(Boolean))];
+            let order = list.find(p => /订单/.test(p) && !/发票/.test(p));
+            let invoice = list.find(p => /发票/.test(p) && !/订单/.test(p));
+            // 仅当两个不同路径且无法从文件名判断时，才按顺序兜底
+            if (!order && !invoice && list.length >= 2) {
+                order = list[0];
+                invoice = list[1];
+            } else {
+                if (!order) order = '';
+                if (!invoice) invoice = '';
+            }
+            if (order && invoice && order === invoice) invoice = '';
+            return { order, invoice };
+        }
+
+        function inferKindFromPath(path) {
+            const p = String(path || '');
+            if (/订单/.test(p) && !/发票/.test(p)) return 'order';
+            if (/发票/.test(p) && !/订单/.test(p)) return 'invoice';
+            return null;
+        }
+
+        let lastDropKey = '';
+        let lastDropAt = 0;
 
         function addLog(type, message) {
             const logBox = document.getElementById('terminalLog');
@@ -440,10 +625,33 @@
             const text = document.getElementById('terminalLog').innerText;
             try {
                 await navigator.clipboard.writeText(text);
-                addLog('INFO', '控制台日志已复制到剪贴板。');
+            addLog('INFO', '控制台日志已复制到剪贴板。');
             } catch (e) {
                 addLog('WARN', '复制失败，请手动选择日志文本。');
             }
+        }
+
+        function setUiLocked(locked, message) {
+            const el = document.getElementById('uiLock');
+            const text = document.getElementById('uiLockText');
+            if (locked) {
+                uiLockCount += 1;
+                if (message) text.textContent = message;
+                el.classList.add('show');
+                el.setAttribute('aria-hidden', 'false');
+                document.body.classList.add('ui-locked');
+            } else {
+                uiLockCount = Math.max(0, uiLockCount - 1);
+                if (uiLockCount === 0) {
+                    el.classList.remove('show');
+                    el.setAttribute('aria-hidden', 'true');
+                    document.body.classList.remove('ui-locked');
+                }
+            }
+        }
+
+        function isUiLocked() {
+            return uiLockCount > 0;
         }
 
         function setBusy(busy) {
@@ -452,6 +660,8 @@
             btnStart.disabled = busy;
             document.getElementById('engineText').textContent = busy ? '比对中…' : '引擎正常';
             document.getElementById('engineDot').className = busy ? 'dot busy' : 'dot';
+            if (busy) setUiLocked(true, '正在比对，请稍候…');
+            else setUiLocked(false);
             refreshOpenBtn();
         }
 
@@ -481,33 +691,265 @@
             refreshOpenBtn();
         }
 
+        function getMonitorMode() {
+            const el = document.querySelector('input[name="monitorMode"]:checked');
+            return el ? el.value : 'daily';
+        }
+
+        function onModeChange() {
+            const strategic = getMonitorMode() === 'strategic';
+            document.getElementById('strategicPanel').style.display = strategic ? 'block' : 'none';
+            if (isUiLocked() || isProcessing) {
+                updateStatMeta();
+                return;
+            }
+            if (strategic) {
+                const orderPath = (document.getElementById('orderFilePath').value || '').trim();
+                if (orderPath) refreshStatObjects(false);
+                else {
+                    lastLoadedOrderForStats = '';
+                    renderStatPlaceholder('请先选择订单数据文件，以加载「统计对象」类别');
+                }
+            }
+            updateStatMeta();
+        }
+
+        function renderStatPlaceholder(text) {
+            document.getElementById('statObjectList').innerHTML =
+                '<div class="stat-placeholder">' + text + '</div>';
+            updateStatMeta();
+        }
+
+        function getSelectedStatObjects() {
+            return Array.from(document.querySelectorAll('#statObjectList input[type="checkbox"]:checked'))
+                .map(el => el.value);
+        }
+
+        function updateStatMeta() {
+            const n = getSelectedStatObjects().length;
+            document.getElementById('statObjectMeta').textContent =
+                '已选 ' + n + ' 类 · 将仅比对这些类别下的订单型号及同型号发票；未选中数据不写入结果';
+        }
+
+        function selectAllStats(checked) {
+            document.querySelectorAll('#statObjectList input[type="checkbox"]').forEach(el => {
+                el.checked = !!checked;
+            });
+            updateStatMeta();
+        }
+
+        function renderStatObjects(items, keepSelected) {
+            const prev = keepSelected ? new Set(getSelectedStatObjects()) : new Set();
+            const box = document.getElementById('statObjectList');
+            if (!items || !items.length) {
+                renderStatPlaceholder('订单中无非空「统计对象」，无法进行战略品监察');
+                return;
+            }
+            box.innerHTML = '';
+            items.forEach((name, idx) => {
+                const id = 'stat_' + idx;
+                const lab = document.createElement('label');
+                lab.className = 'stat-item';
+                lab.htmlFor = id;
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.id = id;
+                input.value = name;
+                input.checked = prev.has(name);
+                input.addEventListener('change', updateStatMeta);
+                const span = document.createElement('span');
+                span.textContent = name;
+                lab.appendChild(input);
+                lab.appendChild(span);
+                box.appendChild(lab);
+            });
+            updateStatMeta();
+        }
+
+        async function refreshStatObjects(keepSelected) {
+            if (!api()) return;
+            const orderPath = (document.getElementById('orderFilePath').value || '').trim();
+            if (!orderPath) {
+                lastLoadedOrderForStats = '';
+                renderStatPlaceholder('请先选择订单数据文件，以加载「统计对象」类别');
+                return;
+            }
+            setUiLocked(true, '正在加载统计对象…');
+            try {
+                const res = await api().list_stat_objects(orderPath);
+                if (res && res.ok) {
+                    lastLoadedOrderForStats = orderPath;
+                    renderStatObjects(res.items || [], !!keepSelected);
+                    addLog('INFO', '已加载统计对象 ' + (res.items || []).length + ' 类');
+                } else {
+                    lastLoadedOrderForStats = '';
+                    renderStatPlaceholder((res && res.error) || '加载统计对象失败');
+                    if (res && res.error) addLog('WARN', res.error);
+                }
+            } catch (e) {
+                lastLoadedOrderForStats = '';
+                renderStatPlaceholder('加载统计对象失败');
+                addLog('WARN', '加载统计对象失败：' + e);
+            } finally {
+                setUiLocked(false);
+            }
+        }
+
+        async function analyzeInvoicePath(path, force) {
+            if (!api()) return;
+            path = (path || '').trim();
+            if (!path) return;
+            if (!force && path === lastAnalyzedInvoice) return;
+
+            const days = parseInt(document.getElementById('accountPeriod').value || '30', 10);
+            setUiLocked(true, '正在上传并分析…');
+            try {
+                const res = await api().analyze_invoice(path, days);
+                if (res && res.ok && res.period && res.period.start && res.period.end) {
+                    lastAnalyzedInvoice = path;
+                    document.getElementById('startDate').value = res.period.start;
+                    document.getElementById('endDate').value = res.period.end;
+                    addLog('SUCCESS', '已根据发票推断查询周期：' + res.period.start + ' ~ ' + res.period.end);
+                } else {
+                    lastAnalyzedInvoice = '';
+                    const err = (res && (res.error || (res.period && res.period.error))) || '无法根据发票推断查询周期';
+                    addLog('WARN', err);
+                    alert('无法根据发票推断查询周期：\n' + err);
+                }
+            } catch (e) {
+                lastAnalyzedInvoice = '';
+                addLog('WARN', '发票分析失败：' + e);
+                alert('发票分析失败：\n' + e);
+            } finally {
+                setUiLocked(false);
+            }
+        }
+
+        async function onOrderPathCommit() {
+            if (isUiLocked() || isProcessing) return;
+            const path = (document.getElementById('orderFilePath').value || '').trim();
+            document.getElementById('orderFilePath').value = path;
+            if (!path) {
+                lastLoadedOrderForStats = '';
+                if (getMonitorMode() === 'strategic') {
+                    renderStatPlaceholder('请先选择订单数据文件，以加载「统计对象」类别');
+                }
+                return;
+            }
+            maybeSetOutput(path.replace(/[^\\\/]+$/, '比对结果.xlsx'));
+            if (getMonitorMode() === 'strategic' && path !== lastLoadedOrderForStats) {
+                await refreshStatObjects(false);
+            }
+        }
+
+        async function onInvoicePathCommit() {
+            if (isUiLocked() || isProcessing) return;
+            const path = (document.getElementById('invoiceFilePath').value || '').trim();
+            document.getElementById('invoiceFilePath').value = path;
+            if (!path) {
+                lastAnalyzedInvoice = '';
+                return;
+            }
+            maybeSetOutput(path.replace(/[^\\\/]+$/, '比对结果.xlsx'));
+            await analyzeInvoicePath(path, false);
+        }
+
+        function onSavePathCommit() {
+            if (isUiLocked() || isProcessing) return;
+            const path = (document.getElementById('saveFilePath').value || '').trim();
+            document.getElementById('saveFilePath').value = path;
+            refreshOpenBtn();
+        }
+
         async function browseOrder() {
             if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            if (isUiLocked() || isProcessing) return;
             const res = await api().browse_order();
             if (res && res.ok) {
-                document.getElementById('orderFilePath').value = res.path;
-                maybeSetOutput(res.output);
+                await applyOrderPath(res.path);
             }
         }
 
         async function browseInvoice() {
             if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
-            const months = parseInt(document.getElementById('accountPeriod').value || '1', 10);
-            const res = await api().browse_invoice(months);
+            if (isUiLocked() || isProcessing) return;
+            const res = await api().browse_invoice();
             if (res && res.ok) {
-                document.getElementById('invoiceFilePath').value = res.path;
-                maybeSetOutput(res.output);
-                if (res.period && res.period.start && res.period.end) {
-                    document.getElementById('startDate').value = res.period.start;
-                    document.getElementById('endDate').value = res.period.end;
-                } else if (res.period && res.period.error) {
-                    alert('无法根据发票推断查询周期：\n' + res.period.error);
-                }
+                await applyInvoicePath(res.path, true);
             }
         }
 
+        window.__hostFileDrop = async function (paths) {
+            let kind = activeDropKind;
+            clearDropVisual();
+            if (isUiLocked() || isProcessing) {
+                addLog('WARN', '当前正在处理，请稍后再拖入文件。');
+                activeDropKind = null;
+                return;
+            }
+            const list = [...new Set(
+                (Array.isArray(paths) ? paths : [])
+                    .map(p => String(p || '').trim())
+                    .filter(Boolean)
+            )];
+            // 同一次拖放可能触发两次宿主回调，短时间内去重
+            const dropKey = list.join('|') + '::' + (kind || '');
+            const now = Date.now();
+            if (dropKey && dropKey === lastDropKey && (now - lastDropAt) < 1000) {
+                activeDropKind = null;
+                return;
+            }
+            lastDropKey = dropKey;
+            lastDropAt = now;
+
+            addLog('INFO', '收到拖放文件 ' + list.length + ' 个' + (list.length ? '：' + list.map(p => p.split(/[\\/]/).pop()).join('、') : ''));
+            const excel = list.filter(isExcelPath);
+            activeDropKind = null;
+            if (!excel.length) {
+                addLog('WARN', '仅支持拖入 .xlsx / .xlsm 文件。');
+                return;
+            }
+            try {
+                // 未点中区域时，用文件名辅助判断，避免订单文件误入发票框
+                if (!kind && excel.length === 1) {
+                    kind = inferKindFromPath(excel[0]);
+                }
+
+                if (kind === 'order') {
+                    await applyOrderPath(excel[0]);
+                    return;
+                }
+                if (kind === 'invoice') {
+                    await applyInvoicePath(excel[0], true);
+                    return;
+                }
+                if (excel.length >= 2) {
+                    const roles = guessDropRoles(excel);
+                    if (roles.order) await applyOrderPath(roles.order);
+                    if (roles.invoice) await applyInvoicePath(roles.invoice, true);
+                    if (roles.order || roles.invoice) {
+                        addLog('INFO', '已按文件名尝试识别订单/发票并分别载入。');
+                    } else {
+                        addLog('WARN', '无法区分订单/发票，请分别拖到对应区域。');
+                    }
+                    return;
+                }
+                // 单文件且文件名也无法判断：只填空着的订单，绝不自动填发票
+                const hasOrder = !!(document.getElementById('orderFilePath').value || '').trim();
+                if (!hasOrder) {
+                    await applyOrderPath(excel[0]);
+                    addLog('INFO', '未指定拖放区域，已载入到订单；发票请拖到发票区域。');
+                    return;
+                }
+                addLog('WARN', '请将文件拖到「订单」或「发票」对应区域（不会把同一文件自动填到另一侧）。');
+            } catch (e) {
+                addLog('WARN', '拖入文件处理失败：' + e);
+            }
+        };
+
         async function browseOutput() {
             if (!api()) return addLog('WARN', '桌面宿主未就绪，请通过程序启动界面。');
+            if (isUiLocked() || isProcessing) return;
             const res = await api().browse_output(document.getElementById('saveFilePath').value);
             if (res && res.ok) {
                 document.getElementById('saveFilePath').value = res.path;
@@ -549,6 +991,14 @@
                 return;
             }
 
+            const mode = getMonitorMode();
+            const selectedStats = getSelectedStatObjects();
+            if (mode === 'strategic' && selectedStats.length === 0) {
+                addLog('WARN', '战略品监察请至少选择一个统计对象！');
+                alert('战略品监察请至少选择一个统计对象。');
+                return;
+            }
+
             setBusy(true);
             setProgress(0, '数据读取中...');
 
@@ -557,7 +1007,9 @@
                 document.getElementById('startDate').value,
                 document.getElementById('endDate').value,
                 document.getElementById('accountPeriod').value,
-                !!overwriteConfirmed
+                !!overwriteConfirmed,
+                mode,
+                selectedStats
             );
 
             if (!res || !res.ok) {
@@ -633,6 +1085,31 @@
             } catch (e) {
                 addLog('WARN', '初始化默认值失败：' + e);
             }
+        });
+
+        document.getElementById('orderFilePath').addEventListener('change', onOrderPathCommit);
+        document.getElementById('orderFilePath').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); onOrderPathCommit(); }
+        });
+        document.getElementById('invoiceFilePath').addEventListener('change', onInvoicePathCommit);
+        document.getElementById('invoiceFilePath').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); onInvoicePathCommit(); }
+        });
+        document.getElementById('saveFilePath').addEventListener('change', onSavePathCommit);
+        document.getElementById('saveFilePath').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); onSavePathCommit(); }
+        });
+        document.getElementById('accountPeriod').addEventListener('change', () => {
+            const path = (document.getElementById('invoiceFilePath').value || '').trim();
+            if (path) analyzeInvoicePath(path, true);
+        });
+
+        setupDropZone(document.getElementById('orderDropZone'), 'order');
+        setupDropZone(document.getElementById('invoiceDropZone'), 'invoice');
+        document.addEventListener('dragend', clearDropVisual);
+        document.addEventListener('drop', () => {
+            // 兜底清高亮；路径处理由宿主回调负责
+            setTimeout(clearDropVisual, 50);
         });
     </script>
 </body>

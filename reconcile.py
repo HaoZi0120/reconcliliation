@@ -2,7 +2,7 @@
 """订单 vs 发票比对脚本。
 
 规则锁定：
-1. 交货日期 < 开票日期（严格早于）
+1. 日期：交货日严格早于开票日；或开票早于交货≤3天且开票日≥接单日
 2. 型号匹配键：去全部空白后 casefold（大小写、空格不敏感）；展示仍用原文
 3. 已核销（原完全匹配）：匹配键同 + 日期合法 + 数量相等 + |用户价格-含税单价|<=0.02
 4. 已配对但价格不合格细分：实际售价高于申请价格 / 实际售价低于申请价格 / 价格缺失（均需人工）
@@ -39,6 +39,8 @@ INVOICE_REQUIRED_HEADERS = {"开票日期", "规格型号", "数量", "单价"}
 # 仅「已红冲-全额」排除；「已红冲-部分」仍参与比对
 EXCLUDED_INVOICE_STATUS_FULL_FLUSH = "已红冲-全额"
 PRICE_TOLERANCE = 0.02
+# 开票可早于交货的最大天数（须同时满足开票日≥接单日）
+INVOICE_EARLY_DAYS = 3
 # 已配对但价格相关的细分状态（均 need_manual=True）
 STATUS_MATCHED = "已核销"  # 原「完全匹配」
 STATUS_PRICE_OVER = "实际售价高于申请价格"
@@ -47,8 +49,8 @@ STATUS_PRICE_MISSING = "价格缺失"
 NEED_EXPLAIN_YES = "需解释"
 
 # 未配 / 账期相关状态
-STATUS_GRACE_ORDER = "账期内待开票"
-STATUS_GRACE_INVOICE = "账期内无订单"
+STATUS_GRACE_ORDER = "开票在下一年"  # 原「账期内待开票」
+STATUS_GRACE_INVOICE = "订单在上一年"  # 原「账期内无订单」
 STATUS_ORDER_NO_INV = "订单未开票"
 STATUS_INV_NO_ORDER = "发票无订单"
 STATUS_SAME_DATE = "同型号开票早于发货"
@@ -83,6 +85,14 @@ VERIFY_PRIORITY_MID_STATUSES = {
 
 DEFAULT_ACCOUNT_DAYS = 30
 
+# 监察方式
+MODE_DAILY = "daily"
+MODE_STRATEGIC = "strategic"
+MODE_LABELS = {
+    MODE_DAILY: "日常监察",
+    MODE_STRATEGIC: "战略品监察",
+}
+
 
 def verify_priority_for(status: str) -> str:
     """根据匹配状态返回核实优先级：高 / 中 / 空。"""
@@ -105,8 +115,8 @@ class PeriodConfig:
     start: date
     end: date
     account_days: int
-    grace_invoice_until: date  # 开票日<=此日且无订单 → 账期内无订单
-    grace_order_from: date  # 交货日>=此日且无发票 → 账期内待开票
+    grace_invoice_until: date  # 开票日<=此日且无订单 → 订单在上一年
+    grace_order_from: date  # 交货日>=此日且无发票 → 开票在下一年
 
 
 def to_date_only(v):
@@ -195,17 +205,33 @@ FILL_ZONE_B_INV_DATA = FILL_INV_DATA
 FILL_ZONE_B_ORD_DATA = FILL_ORD_DATA
 FILL_ZONE_C_DATA = FILL_INV_DATA
 FILL_ZONE_D_DATA = FILL_ORD_DATA
-FONT_HEADER_WHITE = Font(bold=True, color="FFFFFF")
-FONT_HEADER_DARK = Font(bold=True, color="1F4E79")
-FONT_VERIFY_HIGH = Font(bold=True, color="C00000")  # 核实=高：红字
-FONT_VERIFY_MID = Font(bold=True, color="833C0C")
-FONT_HIGH_INV_ORD = Font(color="C00000")  # 核实=高：发票/订单列红字
-FONT_EXPLAIN = Font(bold=True, color="C65911")  # 「需解释」橘色加粗
-FONT_STATUS_OVER = Font(bold=True, color="C00000")
-FONT_BIAS_OTHER = Font(color="7030A0")
-FONT_REASON = Font(color="595959", size=9)
+# 匹配明细统一等线字体
+FONT_NAME = "等线"
+
+
+def _font(bold=False, color=None, size=None):
+    kw = {"name": FONT_NAME}
+    if bold:
+        kw["bold"] = True
+    if color is not None:
+        kw["color"] = color
+    if size is not None:
+        kw["size"] = size
+    return Font(**kw)
+
+
+FONT_DEFAULT = _font()
+FONT_HEADER_WHITE = _font(bold=True, color="FFFFFF")
+FONT_HEADER_DARK = _font(bold=True, color="1F4E79")
+FONT_VERIFY_HIGH = _font(bold=True, color="C00000")  # 核实=高：红字
+FONT_VERIFY_MID = _font(bold=True, color="833C0C")
+FONT_HIGH_INV_ORD = _font(color="C00000")  # 核实=高：发票/订单列红字
+FONT_EXPLAIN = _font(bold=True, color="C65911")  # 「需解释」橘色加粗
+FONT_STATUS_OVER = _font(bold=True, color="C00000")
+FONT_BIAS_OTHER = _font(color="7030A0")
+FONT_REASON = _font(color="595959", size=9)
 FILL_MODEL_SUMMARY = PatternFill("solid", fgColor="D9D9D9")  # 型号汇总行浅灰底
-FONT_MODEL_SUMMARY = Font(bold=True, color="000000")
+FONT_MODEL_SUMMARY = _font(bold=True, color="000000")
 THIN = Border(
     left=Side(style="thin", color="B0B0B0"),
     right=Side(style="thin", color="B0B0B0"),
@@ -380,6 +406,9 @@ def preprocess_orders(rows):
         row["_ship_dt"] = (
             datetime(ship_d.year, ship_d.month, ship_d.day) if ship_d else None
         )
+        row["_recv_dt"] = (
+            datetime(recv_d.year, recv_d.month, recv_d.day) if recv_d else None
+        )
         row["_exclude_reasons"] = order_exclude_reasons(row)
         out.append(row)
     out.sort(
@@ -479,17 +508,67 @@ def model_qty_totals(orders, invoices):
     return so, si
 
 
-def find_candidates(order, invoices, used_inv):
-    """数量相等且日期合法的候选发票下标列表。"""
+def date_pair_ok(ship_dt, inv_dt, recv_dt=None) -> bool:
+    """订单-发票日期是否合法。
+
+    - 常规：交货日严格早于开票日
+    - 软窗口：开票早于交货 1～INVOICE_EARLY_DAYS 天，且接单日存在、开票日≥接单日
+    - 同日开票=交货：非法（保持现网）
+    - 软窗口但接单日缺失：非法
+    """
+    ship_d = to_date_only(ship_dt)
+    inv_d = to_date_only(inv_dt)
+    recv_d = to_date_only(recv_dt)
+    if ship_d is None or inv_d is None:
+        return False
+    if ship_d < inv_d:
+        return True
+    early = (ship_d - inv_d).days
+    if 1 <= early <= INVOICE_EARLY_DAYS and recv_d is not None and inv_d >= recv_d:
+        return True
+    return False
+
+
+def date_pair_used_soft_window(ship_dt, inv_dt, recv_dt=None) -> bool:
+    """是否靠「提前≤3天 + 接单日」软窗口合法（非常规 ship<inv）。"""
+    ship_d = to_date_only(ship_dt)
+    inv_d = to_date_only(inv_dt)
+    recv_d = to_date_only(recv_dt)
+    if ship_d is None or inv_d is None or recv_d is None:
+        return False
+    if ship_d < inv_d:
+        return False
+    early = (ship_d - inv_d).days
+    return 1 <= early <= INVOICE_EARLY_DAYS and inv_d >= recv_d
+
+
+def build_model_index(rows):
+    """按 _model_key 建索引：key -> [行下标]。"""
+    idx: dict[str, list[int]] = defaultdict(list)
+    for i, row in enumerate(rows):
+        k = row.get("_model_key")
+        if k:
+            idx[k].append(i)
+    return idx
+
+
+def find_candidates(order, invoices, used_inv, candidate_js=None):
+    """数量相等且日期合法的候选发票下标列表。
+
+    candidate_js: 可选，同型号发票下标列表（有索引时传入，避免全表扫描）。
+    """
+    if candidate_js is None:
+        candidate_js = range(len(invoices))
     cands = []
-    for j, inv in enumerate(invoices):
+    for j in candidate_js:
         if j in used_inv:
             continue
+        inv = invoices[j]
         if inv["_model_key"] != order["_model_key"]:
             continue
         if order["_ship_dt"] is None or inv["_inv_dt"] is None:
             continue
-        if not (order["_ship_dt"] < inv["_inv_dt"]):
+        if not date_pair_ok(order["_ship_dt"], inv["_inv_dt"], order.get("_recv_dt")):
             continue
         if order["_qty"] is None or inv["_qty"] is None:
             continue
@@ -500,7 +579,7 @@ def find_candidates(order, invoices, used_inv):
 
 
 def pick_best_candidate(order, invoices, cand_idxs):
-    """在数量已相等的候选中：价格接近优先，再 FIFO（交货最近且早于开票）。"""
+    """在数量已相等的候选中：价格接近优先，再 FIFO（开票日早优先）。"""
     scored = []
     for j in cand_idxs:
         inv = invoices[j]
@@ -533,8 +612,19 @@ def _dedupe_reasons(reasons):
     return uniq
 
 
-def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodConfig | None):
-    """返回 (status, need_manual, reasons, bias)。"""
+def classify_unmatched_order(
+    order,
+    invoices,
+    so,
+    si,
+    used_inv,
+    period: PeriodConfig | None,
+    same_model_js=None,
+):
+    """返回 (status, need_manual, reasons, bias)。
+
+    same_model_js: 同型号发票下标（来自型号索引）；缺省则全表扫描（兼容旧调用）。
+    """
     reasons = []
     model = order["_model_key"]
     if not model:
@@ -551,11 +641,13 @@ def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodCo
     if period and ship_d and ship_d >= period.grace_order_from:
         reasons.append(
             f"GRACE_ORDER:交货日{ship_d}≥期末豁免起始日{period.grace_order_from}，"
-            f"账期内待开票（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
+            f"开票在下一年（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
         )
         return STATUS_GRACE_ORDER, False, reasons, BIAS_ORDER
 
-    same_model_invs = [i for i in invoices if i["_model_key"] == model]
+    if same_model_js is None:
+        same_model_js = [j for j, i in enumerate(invoices) if i["_model_key"] == model]
+    same_model_invs = [invoices[j] for j in same_model_js]
     if not same_model_invs:
         reasons.append("ONLY_ORDER:该型号仅出现在订单中")
         status_flag = order.get("订单状态")
@@ -564,11 +656,11 @@ def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodCo
         return STATUS_ORDER_NO_INV, False, _dedupe_reasons(reasons), BIAS_ORDER
 
     # 同型号细分：占用 > 日期 > 数量
-    legal_all = find_candidates(order, invoices, used_inv=set())
-    legal_free = find_candidates(order, invoices, used_inv)
+    legal_all = find_candidates(order, invoices, used_inv=set(), candidate_js=same_model_js)
+    legal_free = find_candidates(order, invoices, used_inv, candidate_js=same_model_js)
     if legal_all and not legal_free:
         reasons.append(
-            "OCCUPIED:存在数量相等且交货早于开票的同型号发票，但已被其他订单行占用"
+            "OCCUPIED:存在数量相等且日期合法的同型号发票，但已被其他订单行占用"
         )
         reasons.append("偏向说明:表面像订单未开票，根因更偏配对竞争(其他)")
         return STATUS_SAME_OCCUPIED, True, _dedupe_reasons(reasons), BIAS_OTHER
@@ -582,12 +674,16 @@ def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodCo
     ]
     if equal_qty and not legal_all:
         reasons.append(
-            "DATE_ORDER:同型号存在等量发票，但不满足交货日期早于开票日期"
+            "DATE_ORDER:同型号存在等量发票，但不满足日期规则"
+            f"（交货早于开票，或开票早于交货≤{INVOICE_EARLY_DAYS}天且开票≥接单）"
         )
         for inv in equal_qty:
             if order["_ship_dt"] and inv["_inv_dt"]:
+                recv = order.get("_recv_dt")
+                recv_s = f"{recv:%Y-%m-%d}" if recv else "空"
                 reasons.append(
-                    f"DATE_ORDER:交货{order['_ship_dt']:%Y-%m-%d} / 开票{inv['_inv_dt']:%Y-%m-%d}"
+                    f"DATE_ORDER:交货{order['_ship_dt']:%Y-%m-%d} / "
+                    f"开票{inv['_inv_dt']:%Y-%m-%d} / 接单{recv_s}"
                 )
                 break
         reasons.append("偏向说明:订单侧未配上，更偏向订单未开票")
@@ -614,8 +710,19 @@ def classify_unmatched_order(order, invoices, so, si, used_inv, period: PeriodCo
     return STATUS_SAME_QTY, True, _dedupe_reasons(reasons), BIAS_ORDER
 
 
-def classify_unmatched_invoice(inv, orders, so, si, used_ord, period: PeriodConfig | None):
-    """返回 (status, need_manual, reasons, bias)。used_ord 为已占用订单下标集合。"""
+def classify_unmatched_invoice(
+    inv,
+    orders,
+    so,
+    si,
+    used_ord,
+    period: PeriodConfig | None,
+    same_model_ois=None,
+):
+    """返回 (status, need_manual, reasons, bias)。used_ord 为已占用订单下标集合。
+
+    same_model_ois: 同型号订单下标（来自型号索引）；缺省则全表扫描。
+    """
     reasons = []
     model = inv["_model_key"]
     if not model:
@@ -631,26 +738,27 @@ def classify_unmatched_invoice(inv, orders, so, si, used_ord, period: PeriodConf
     if period and inv_d and inv_d <= period.grace_invoice_until:
         reasons.append(
             f"GRACE_INVOICE:开票日{inv_d}≤期初豁免截止日{period.grace_invoice_until}，"
-            f"账期内无订单（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
+            f"订单在上一年（查询周期{period.start}~{period.end}，账期{period.account_days}天）"
         )
         return STATUS_GRACE_INVOICE, False, reasons, BIAS_INV
 
-    same_model_orders = [o for o in orders if o["_model_key"] == model]
+    if same_model_ois is None:
+        same_model_ois = [oi for oi, o in enumerate(orders) if o["_model_key"] == model]
+    same_model_orders = [orders[oi] for oi in same_model_ois]
     if not same_model_orders:
         reasons.append("ONLY_INVOICE:该型号仅出现在发票中")
         return STATUS_INV_NO_ORDER, False, reasons, BIAS_INV
 
-    # 找「对本发票合法」的订单：等量 + 交货 < 开票
+    # 找「对本发票合法」的订单：等量 + 日期规则（含软窗口）
     def legal_order_indexes(ignore_used: bool):
         idxs = []
-        for oi, o in enumerate(orders):
+        for oi in same_model_ois:
             if not ignore_used and oi in used_ord:
                 continue
-            if o["_model_key"] != model:
-                continue
+            o = orders[oi]
             if o["_ship_dt"] is None or inv["_inv_dt"] is None:
                 continue
-            if not (o["_ship_dt"] < inv["_inv_dt"]):
+            if not date_pair_ok(o["_ship_dt"], inv["_inv_dt"], o.get("_recv_dt")):
                 continue
             if o["_qty"] is None or inv["_qty"] is None:
                 continue
@@ -663,7 +771,7 @@ def classify_unmatched_invoice(inv, orders, so, si, used_ord, period: PeriodConf
     legal_free = legal_order_indexes(ignore_used=False)
     if legal_all and not legal_free:
         reasons.append(
-            "OCCUPIED:存在数量相等且交货早于开票的同型号订单，但已被其他发票行占用"
+            "OCCUPIED:存在数量相等且日期合法的同型号订单，但已被其他发票行占用"
         )
         reasons.append("偏向说明:表面像发票无订单，根因更偏配对竞争(其他)")
         return STATUS_SAME_OCCUPIED, True, _dedupe_reasons(reasons), BIAS_OTHER
@@ -677,12 +785,16 @@ def classify_unmatched_invoice(inv, orders, so, si, used_ord, period: PeriodConf
     ]
     if equal_qty and not legal_all:
         reasons.append(
-            "DATE_ORDER:同型号存在等量订单，但不满足交货日期早于开票日期"
+            "DATE_ORDER:同型号存在等量订单，但不满足日期规则"
+            f"（交货早于开票，或开票早于交货≤{INVOICE_EARLY_DAYS}天且开票≥接单）"
         )
         for o in equal_qty:
             if o["_ship_dt"] and inv["_inv_dt"]:
+                recv = o.get("_recv_dt")
+                recv_s = f"{recv:%Y-%m-%d}" if recv else "空"
                 reasons.append(
-                    f"DATE_ORDER:交货{o['_ship_dt']:%Y-%m-%d} / 开票{inv['_inv_dt']:%Y-%m-%d}"
+                    f"DATE_ORDER:交货{o['_ship_dt']:%Y-%m-%d} / "
+                    f"开票{inv['_inv_dt']:%Y-%m-%d} / 接单{recv_s}"
                 )
                 break
         reasons.append("偏向说明:发票侧未配上，更偏向发票无订单")
@@ -723,17 +835,47 @@ def make_result_row(order, invoice, status, need_manual, reasons, bias=None, **e
     return row
 
 
-def reconcile(orders, invoices, period: PeriodConfig | None = None):
-    """orders/invoices 可为全量（内部只对未排除行做匹配；排除行仍输出）。"""
+def reconcile(
+    orders,
+    invoices,
+    period: PeriodConfig | None = None,
+    progress_callback=None,
+):
+    """orders/invoices 可为全量（内部只对未排除行做匹配；排除行仍输出）。
+
+    progress_callback 可选：callback(pct: int, message: str)，匹配阶段建议占用 55～74。
+    """
     active_orders, excluded_orders = split_orders_for_match(orders)
     active_invoices, excluded_invoices = split_invoices_for_match(invoices)
     so, si = model_qty_totals(active_orders, active_invoices)
+    inv_by_model = build_model_index(active_invoices)
+    ord_by_model = build_model_index(active_orders)
     used_inv = set()  # 已成功配对的发票下标（相对 active_invoices）
     matched_ord = set()  # 已成功配对的订单下标（相对 active_orders）
     results = []
 
+    last_pct = -1
+
+    def _match_progress(done: int, total: int, lo: int, hi: int, label: str):
+        nonlocal last_pct
+        if progress_callback is None:
+            return
+        if total <= 0:
+            pct = hi
+        else:
+            pct = lo + int((hi - lo) * (done / total))
+        pct = max(lo, min(hi, pct))
+        # 仅在百分比前进时回调，避免刷屏
+        if pct <= last_pct and done < total:
+            return
+        last_pct = pct
+        progress_callback(pct, f"{label}（{done}/{total}）")
+
+    n_ord = len(active_orders)
     for oi, order in enumerate(active_orders):
         reasons = []
+        model = order.get("_model_key")
+        same_js = inv_by_model.get(model, []) if model else []
 
         if not order["_model_key"] or order["_qty"] is None or order["_ship_dt"] is None:
             bad = []
@@ -752,16 +894,26 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
                     [f"BAD_FIELD:关键字段缺失或无法解析：{'/'.join(bad)}"],
                 )
             )
+            _match_progress(oi + 1, n_ord, 55, 68, "正在匹配订单")
             continue
 
-        cands = find_candidates(order, active_invoices, used_inv)
+        cands = find_candidates(
+            order, active_invoices, used_inv, candidate_js=same_js
+        )
         if not cands:
             status, need, rs, bias = classify_unmatched_order(
-                order, active_invoices, so, si, used_inv, period
+                order,
+                active_invoices,
+                so,
+                si,
+                used_inv,
+                period,
+                same_model_js=same_js,
             )
             results.append(
                 make_result_row(order, None, status, need, rs, bias=bias)
             )
+            _match_progress(oi + 1, n_ord, 55, 68, "正在匹配订单")
             continue
 
         best_j, multi = pick_best_candidate(order, active_invoices, cands)
@@ -778,9 +930,20 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
                 "MULTI_CAND:同型号存在多条等量候选，按价格优先+FIFO取一条，可能配错"
             )
 
+        if date_pair_used_soft_window(
+            order["_ship_dt"], inv["_inv_dt"], order.get("_recv_dt")
+        ):
+            ship_d = to_date_only(order["_ship_dt"])
+            inv_d = to_date_only(inv["_inv_dt"])
+            recv_d = to_date_only(order.get("_recv_dt"))
+            early = (ship_d - inv_d).days if ship_d and inv_d else 0
+            reasons.append(
+                f"DATE_EARLY_OK:开票早于交货{early}天（≤{INVOICE_EARLY_DAYS}），"
+                f"且开票日{inv_d}≥接单日{recv_d}，按软窗口判定日期合法"
+            )
+
         append_model_text_diffs(reasons, order.get("型号"), inv.get("规格型号"))
 
-        model = order["_model_key"]
         if abs(so.get(model, 0) - si.get(model, 0)) > 1e-9:
             reasons.append(
                 f"MODEL_QTY_GAP:该型号订单数量合计与发票数量合计不等"
@@ -822,10 +985,12 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
                 price_diff=price_diff,
             )
         )
+        _match_progress(oi + 1, n_ord, 55, 68, "正在匹配订单")
 
-    for j, inv in enumerate(active_invoices):
-        if j in used_inv:
-            continue
+    unmatched_inv_js = [j for j in range(len(active_invoices)) if j not in used_inv]
+    n_uinv = len(unmatched_inv_js)
+    for ui, j in enumerate(unmatched_inv_js):
+        inv = active_invoices[j]
         if not inv["_model_key"] or inv["_qty"] is None or inv["_inv_dt"] is None:
             bad = []
             if not inv["_model_key"]:
@@ -843,11 +1008,19 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
                     [f"BAD_FIELD:关键字段缺失或无法解析：{'/'.join(bad)}"],
                 )
             )
+            _match_progress(ui + 1, n_uinv, 68, 74, "正在归类未配发票")
             continue
         status, need, rs, bias = classify_unmatched_invoice(
-            inv, active_orders, so, si, matched_ord, period
+            inv,
+            active_orders,
+            so,
+            si,
+            matched_ord,
+            period,
+            same_model_ois=ord_by_model.get(inv["_model_key"], []),
         )
         results.append(make_result_row(None, inv, status, need, rs, bias=bias))
+        _match_progress(ui + 1, n_uinv, 68, 74, "正在归类未配发票")
 
     for order in excluded_orders:
         results.append(
@@ -873,6 +1046,9 @@ def reconcile(orders, invoices, period: PeriodConfig | None = None):
             )
         )
 
+    if progress_callback is not None:
+        progress_callback(74, "匹配收尾完成")
+
     return results, so, si
 
 
@@ -892,6 +1068,7 @@ ORDER_OUT_COLS = [
     "用户",
     "战略标记",
     "统计对象",
+    "产品二级分类",
 ]
 
 INVOICE_OUT_COLS = [
@@ -1101,7 +1278,13 @@ def write_detail_header(ws):
     ws.row_dimensions[1].height = 32
 
 
-def write_result_rows(ws, rows):
+def write_result_rows(
+    ws,
+    rows,
+    progress_callback=None,
+    progress_lo=80,
+    progress_hi=88,
+):
     """写入匹配明细样式行。
 
     发票列恒绿底、订单列恒蓝底（不整行黄/橙覆盖）；
@@ -1115,6 +1298,20 @@ def write_result_rows(ws, rows):
     idx_bias = META_COL_INDEX.get("问题偏向")
     idx_reason = META_COL_INDEX.get("异议原因")
 
+    n_rows = len(rows)
+    last_pct = -1
+
+    def _row_progress(done: int):
+        nonlocal last_pct
+        if progress_callback is None or n_rows <= 0:
+            return
+        pct = progress_lo + int((progress_hi - progress_lo) * (done / n_rows))
+        pct = max(progress_lo, min(progress_hi, pct))
+        if pct <= last_pct and done < n_rows:
+            return
+        last_pct = pct
+        progress_callback(pct, f"正在写入匹配明细（{done}/{n_rows}）")
+
     for ri, r in enumerate(rows, start=2):
         if r.get("_summary"):
             for ci, (kind, field, _) in enumerate(RESULT_COLUMNS, start=1):
@@ -1125,6 +1322,7 @@ def write_result_rows(ws, rows):
                 if kind != "meta" and field == "数量" and isinstance(cell.value, (int, float)):
                     cell.number_format = "0"
                     cell.alignment = Alignment(horizontal="right")
+            _row_progress(ri - 1)
             continue
 
         vp = r.get("verify_priority") or ""
@@ -1134,6 +1332,7 @@ def write_result_rows(ws, rows):
         for ci, (kind, field, _) in enumerate(RESULT_COLUMNS, start=1):
             cell = ws.cell(ri, ci, result_cell_value(r, kind, field))
             cell.border = THIN
+            cell.font = FONT_DEFAULT
             if ci in DATE_COL_INDEXES and isinstance(cell.value, (datetime, date)):
                 cell.number_format = "yyyy-mm-dd"
             if kind == "订单" and field == "E率" and isinstance(cell.value, (int, float)):
@@ -1177,45 +1376,43 @@ def write_result_rows(ws, rows):
             ):
                 cell.number_format = "0.00"
 
+        _row_progress(ri - 1)
+
     last = max(1, ws.max_row)
     ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last}"
     ws.freeze_panes = f"{get_column_letter(FREEZE_AFTER_COL)}2"
     for ci in HIDDEN_COL_INDEXES:
         ws.column_dimensions[get_column_letter(ci)].hidden = True
+    if progress_callback is not None:
+        progress_callback(progress_hi, "正在调整列宽…")
     _autosize(ws, max_width=28)
 
 
-def _row_event_datetime(r) -> datetime:
-    """明细排序用的「发生日」：优先开票日，否则交货日，再否则接单日。"""
-    inv = r.get("invoice")
+def _row_sort_datetime(r) -> datetime:
+    """同型号组内排序主日期：优先交货日期；交货日期为空（如仅发票行）则用开票日期。"""
     order = r.get("order")
-    if inv:
-        inv_dt = inv.get("_inv_dt")
-        if inv_dt is not None:
-            return inv_dt
+    inv = r.get("invoice")
     if order:
         ship_dt = order.get("_ship_dt")
         if ship_dt is not None:
             return ship_dt
-        recv = order.get("接单日期")
-        recv_dt = to_datetime(recv) if recv is not None else None
-        if recv_dt is not None:
-            return recv_dt
+    if inv:
+        inv_dt = inv.get("_inv_dt")
+        if inv_dt is not None:
+            return inv_dt
     return datetime.max
 
 
 def _row_secondary_datetime(r) -> datetime:
     """次要日期：另一侧日期，便于同日行稳定对照。"""
-    inv = r.get("invoice")
     order = r.get("order")
-    inv_dt = inv.get("_inv_dt") if inv else None
+    inv = r.get("invoice")
     ship_dt = order.get("_ship_dt") if order else None
-    # 发生日若用了开票日，次要用交货日；反之亦然
-    if inv_dt is not None:
-        return ship_dt or datetime.max
+    inv_dt = inv.get("_inv_dt") if inv else None
+    # 主排序用了交货日 → 次要用开票日；主排序用了开票日 → 次要用交货日（通常为空）
     if ship_dt is not None:
         return inv_dt or datetime.max
-    return datetime.max
+    return ship_dt or datetime.max
 
 
 def _detail_model_key(r) -> str:
@@ -1287,20 +1484,28 @@ def with_model_summary_rows(sorted_rows):
     return out
 
 
-def write_detail_sheet(wb, results):
+def write_detail_sheet(wb, results, progress_callback=None):
     ws = wb.create_sheet("匹配明细", 0)
 
     def sort_key(r):
-        """相同型号聚拢；组内按发生日时间线升序（有开票日用开票日，否则交货日）。"""
+        """相同型号聚拢；组内优先按交货日期升序，无交货日期（仅发票）则按开票日期。"""
         return (
             _detail_model_key(r),
-            _row_event_datetime(r),
+            _row_sort_datetime(r),
             _row_secondary_datetime(r),
             r.get("status") or "",
         )
 
+    if progress_callback is not None:
+        progress_callback(80, "正在排序匹配明细…")
     sorted_rows = sorted(results, key=sort_key)
-    write_result_rows(ws, with_model_summary_rows(sorted_rows))
+    write_result_rows(
+        ws,
+        with_model_summary_rows(sorted_rows),
+        progress_callback=progress_callback,
+        progress_lo=80,
+        progress_hi=88,
+    )
     return ws
 
 
@@ -1320,8 +1525,8 @@ def write_summary_sheet(wb, results, orders, invoices, so, si):
         "同型号开票早于发货",
         "同型号数量无法对齐",
         "同型号行已被其他票/单占用",
-        "账期内待开票",
-        "账期内无订单",
+        "开票在下一年",
+        "订单在上一年",
         "订单未开票",
         "发票无订单",
         "不参与比对",
@@ -1439,20 +1644,40 @@ def write_summary_sheet(wb, results, orders, invoices, so, si):
     _autosize(ws, max_width=36)
 
 
-def write_rules_sheet(wb, period: PeriodConfig | None = None):
+def write_rules_sheet(
+    wb,
+    period: PeriodConfig | None = None,
+    mode: str = MODE_DAILY,
+    stat_objects: list[str] | None = None,
+):
     ws = wb.create_sheet("规则说明", 2)
+    mode_label = MODE_LABELS.get(mode, mode)
+    mode_lines = [
+        f"监察方式：{mode_label}",
+    ]
+    if mode == MODE_STRATEGIC:
+        cats = "、".join(stat_objects or []) or "（未指定）"
+        mode_lines.append(f"战略品统计对象（已选）：{cats}")
+        mode_lines.append(
+            "战略品监察：仅比对所选统计对象下的订单型号及同型号发票；未选中数据不写入结果"
+        )
+    else:
+        mode_lines.append("日常监察：全量型号比对")
+    mode_lines.append("")
+
     period_lines = []
     if period:
         period_lines = [
             f"发票查询周期：{period.start} ~ {period.end}",
             f"账期：{period.account_days} 天",
-            f"期初豁免截止日（开票日≤此日无订单→账期内无订单）：{period.grace_invoice_until}",
-            f"期末豁免起始日（交货日≥此日无发票→账期内待开票）：{period.grace_order_from}",
+            f"期初豁免截止日（开票日≤此日无订单→订单在上一年）：{period.grace_invoice_until}",
+            f"期末豁免起始日（交货日≥此日无发票→开票在下一年）：{period.grace_order_from}",
             "",
         ]
     lines = [
         "比对规则说明",
         "",
+        *mode_lines,
         *period_lines,
         "一、预处理",
         "1. 订单：新增「价格合计」= 数量 × 用户价格；「E率」= round(((价格/1.13/E价)-1)×100) 整数百分比；交货日期/接单日期仅保留年月日；按型号、交货日期升序",
@@ -1464,7 +1689,8 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "",
         "二、匹配键与约束",
         "1. 关联键：订单.型号 ↔ 发票.规格型号（去全部空白后 casefold，大小写与空格不敏感）",
-        "2. 日期硬约束：交货日期 < 开票日期（严格早于）",
+        f"2. 日期规则：交货日 < 开票日；或开票早于交货 1～{INVOICE_EARLY_DAYS} 天且开票日≥接单日"
+        "（同日开票=交货仍不合法；软窗口缺接单日不合法）",
         "3. 行级一对一；优先数量完全相等，再比价格接近，再 FIFO",
         f"4. 价格容差：|用户价格 - 含税单价| ≤ {PRICE_TOLERANCE}",
         "5. 业务：含税单价不得高于用户价格（申请含税价）",
@@ -1473,8 +1699,8 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "三、状态定义",
         "已核销：日期合法 + 数量相等 + |用户价格-含税单价|≤容差",
         "实际售价高于申请价格 / 实际售价低于申请价格 / 价格缺失：已配对价格问题 → 需人工",
-        "账期内待开票：订单未配上且交货日≥期末豁免起始日 → 不强制人工",
-        "账期内无订单：发票未配上且开票日≤期初豁免截止日 → 不强制人工",
+        "开票在下一年：订单未配上且交货日≥期末豁免起始日 → 不强制人工",
+        "订单在上一年：发票未配上且开票日≤期初豁免截止日 → 不强制人工",
         "订单未开票 / 发票无订单：豁免区外的一侧缺失 → 不强制人工",
         "同型号开票早于发货：同型号有等量对方但不满足先发货后开票 → 需人工；偏向见「问题偏向」列",
         "同型号数量无法对齐：同型号无等量可配行 → 需人工；偏向见「问题偏向」列",
@@ -1484,7 +1710,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "四、核实优先级（筛选用：找数据提供方沟通）",
         "高：实际售价高于申请价格；订单未开票；发票无订单；同型号开票早于发货；同型号数量无法对齐；同型号行已被其他票/单占用",
         "中：数据异常；价格缺失",
-        "空（不沟通）：已核销；账期内待开票；账期内无订单；不参与比对；实际售价低于申请价格",
+        "空（不沟通）：已核销；开票在下一年；订单在上一年；不参与比对；实际售价低于申请价格",
         "核实优先级为「高」时，「是否需要解释」填「需解释」",
         "筛选用法：在「匹配明细」对「核实优先级」筛选「高」或「中」",
         "",
@@ -1492,9 +1718,9 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "1. 发票列序：数电发票号码、货物或应税劳务名称、规格型号、数量、含税单价、"
         "序号/代码/号码/单位/单价/金额/税率/税额/价税合计/状态/购销方/备注（隐藏）、开票日期",
         "2. 订单列序：交货日期、订单号、型号、数量、用户价格、E率、"
-        "价格合计/价格/E价/接单日期/订单状态/用户（隐藏）、战略标记、统计对象",
+        "价格合计/价格/E价/接单日期/订单状态/用户（隐藏）、战略标记、统计对象、产品二级分类",
         "3. 匹配结果列：核实优先级、是否需要解释、匹配状态、问题偏向、是否需人工核对、异议原因",
-        "明细排序：同型号内按发生日升序——有开票日用开票日，仅订单则用交货日（再退接单日），避免未开票订单沉底",
+        "明细排序：同型号内优先按交货日期升序；交货日期为空（有发票无对应订单）则按开票日期升序",
         "",
         "五、问题偏向（三选一，仅未配相关行填写）",
         "订单未开票：订单侧未配或同型号日期/数量问题在订单行",
@@ -1506,6 +1732,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "【数据底色】发票列统一浅绿；订单列统一浅蓝；匹配结果默认浅紫；发票/订单列不做黄/橙整行覆盖",
         "【核实高】发票/订单列=红字+原绿/蓝底；比对结果列=浅橙底；核实优先级=红字加粗；「需解释」=橘色加粗",
         "【型号汇总行】每型号组末：数电发票号码=汇总，规格型号=该型号，发票数量/订单数量=组内合计；浅灰底黑字加粗",
+        "【字体】匹配明细统一使用「等线」字体",
         "【其他】数据异常仅比对结果列浅红底；核实「中」仅核实优先级褐字加粗；"
         "匹配状态「实际售价高于申请价格」「订单未开票」「发票无订单」=红色加粗；"
         "问题偏向「其他」=灰紫字；异议原因=灰色小字",
@@ -1513,7 +1740,7 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
         "",
         "七、异议原因代码（节选）",
         "PRICE_OVER / PRICE_UNDER / MULTI_CAND / CASE_DIFF / SPACE_DIFF",
-        "GRACE_ORDER / GRACE_INVOICE / OCCUPIED / QTY_MISALIGN / DATE_ORDER",
+        "GRACE_ORDER / GRACE_INVOICE / OCCUPIED / QTY_MISALIGN / DATE_ORDER / DATE_EARLY_OK",
         "EXCL_NEG_QTY / EXCL_RED_FLUSH / EXCL_ORDER_NO_S / MODEL_QTY_GAP / BAD_FIELD",
     ]
     for i, line in enumerate(lines, start=1):
@@ -1523,10 +1750,16 @@ def write_rules_sheet(wb, period: PeriodConfig | None = None):
     ws.column_dimensions["A"].width = 100
 
 
-def write_preprocessed_sheets(wb, orders, invoices):
+def write_preprocessed_sheets(wb, orders, invoices, progress_callback=None):
+    def _p(pct, msg):
+        if progress_callback is not None:
+            progress_callback(pct, msg)
+
     ws_o = wb.create_sheet("预处理-订单", 3)
     cols = ORDER_OUT_COLS
     write_header(ws_o, cols)
+    n_o = len(orders)
+    last_pct = -1
     for ri, o in enumerate(orders, start=2):
         for ci, col in enumerate(cols, start=1):
             cell = ws_o.cell(ri, ci, fmt_cell(o.get(col)))
@@ -1536,6 +1769,12 @@ def write_preprocessed_sheets(wb, orders, invoices):
                 cell.number_format = "yyyy-mm-dd"
             if col == "E率" and isinstance(cell.value, (int, float)):
                 cell.number_format = '0"%"'
+        if progress_callback is not None and n_o > 0:
+            done = ri - 1
+            pct = 91 + int(2 * (done / n_o))  # 91→93
+            if pct > last_pct or done >= n_o:
+                last_pct = pct
+                _p(min(93, pct), f"正在写入预处理订单（{done}/{n_o}）")
     _autosize(ws_o)
 
     ws_i = wb.create_sheet("预处理-发票", 4)
@@ -1571,6 +1810,8 @@ def write_preprocessed_sheets(wb, orders, invoices):
         "备注",
     ]
     write_header(ws_i, inv_cols)
+    n_i = len(invoices)
+    last_pct = -1
     for ri, inv in enumerate(invoices, start=2):
         for ci, col in enumerate(inv_cols, start=1):
             cell = ws_i.cell(ri, ci, fmt_cell(inv.get(col)))
@@ -1581,18 +1822,27 @@ def write_preprocessed_sheets(wb, orders, invoices):
                 cell.number_format = "0"
             if col in ("单价", "含税单价") and isinstance(cell.value, (int, float)):
                 cell.number_format = "0.00"
+        if progress_callback is not None and n_i > 0:
+            done = ri - 1
+            pct = 93 + int(2 * (done / n_i))  # 93→95
+            if pct > last_pct or done >= n_i:
+                last_pct = pct
+                _p(min(95, pct), f"正在写入预处理发票（{done}/{n_i}）")
     _autosize(ws_i, max_width=24)
 
 
-def _autosize(ws, max_width=24):
-    for col in ws.columns:
-        letter = get_column_letter(col[0].column)
+def _autosize(ws, max_width=24, sample_rows=80):
+    """按前 sample_rows 行估算列宽，避免 ws.columns 物化整表。"""
+    max_col = ws.max_column or 1
+    max_row = min(ws.max_row or 1, max(1, sample_rows))
+    for ci in range(1, max_col + 1):
         length = 0
-        for cell in col[:80]:
-            if cell.value is None:
+        for ri in range(1, max_row + 1):
+            val = ws.cell(ri, ci).value
+            if val is None:
                 continue
-            length = max(length, min(max_width, len(str(cell.value))))
-        ws.column_dimensions[letter].width = max(10, length + 2)
+            length = max(length, min(max_width, len(str(val))))
+        ws.column_dimensions[get_column_letter(ci)].width = max(10, length + 2)
 
 
 def save_preprocessed_sources(orders, invoices, out_dir: Path):
@@ -1666,17 +1916,29 @@ def run_reconcile(
     period_end=None,
     account_days: int = DEFAULT_ACCOUNT_DAYS,
     progress_callback=None,
+    mode: str = MODE_DAILY,
+    stat_objects: list[str] | None = None,
 ):
     """执行比对并写出结果。返回统计信息字典。
 
     period_start/period_end 为空时，按发票开票日 min/max 所在月的月初～月末推断查询周期。
     account_days 为账期天数。
+    mode: daily=日常监察全量；strategic=战略品监察（按统计对象过滤，未选中数据不写入）。
     progress_callback 可选，签名为 callback(pct: int, message: str)，百分比单调递增。
     """
     def _progress(pct: int, message: str):
         if progress_callback is None:
             return
         progress_callback(max(0, min(100, int(pct))), message)
+
+    mode = (mode or MODE_DAILY).strip().lower()
+    if mode not in (MODE_DAILY, MODE_STRATEGIC):
+        raise ValueError(f"未知监察方式：{mode}（应为 daily 或 strategic）")
+    selected_stats = [
+        s
+        for s in (normalize_stat_object(x) for x in (stat_objects or []))
+        if s
+    ]
 
     order_path = Path(order_path)
     invoice_path = Path(invoice_path)
@@ -1706,9 +1968,24 @@ def run_reconcile(
 
     _progress(25, "正在预处理订单…")
     orders = preprocess_orders(order_raw)
+    order_rows_raw = len(orders)
     _progress(35, "订单预处理完成")
     _progress(38, "正在预处理发票…")
     invoices = preprocess_invoices(inv_raw)
+    invoice_rows_raw = len(invoices)
+
+    strategic_model_keys: list[str] = []
+    if mode == MODE_STRATEGIC:
+        _progress(42, "战略品过滤中…")
+        orders, invoices, strategic_model_keys = filter_for_strategic(
+            orders, invoices, selected_stats
+        )
+        _progress(
+            44,
+            f"战略品过滤完成：订单 {order_rows_raw}→{len(orders)}，"
+            f"发票 {invoice_rows_raw}→{len(invoices)}，型号 {len(strategic_model_keys)}",
+        )
+
     _active_orders, excluded_orders = split_orders_for_match(orders)
     _active_inv, excluded_invoices = split_invoices_for_match(invoices)
     _progress(45, "发票预处理完成")
@@ -1722,7 +1999,9 @@ def run_reconcile(
     _progress(50, "查询周期已确定")
 
     _progress(55, "正在匹配订单与发票…")
-    results, so, si = reconcile(orders, invoices, period=period)
+    results, so, si = reconcile(
+        orders, invoices, period=period, progress_callback=_progress
+    )
     _progress(75, "匹配完成")
 
     _progress(80, "正在写入结果…")
@@ -1730,13 +2009,18 @@ def run_reconcile(
     default = wb.active
     wb.remove(default)
 
-    write_detail_sheet(wb, results)
-    _progress(85, "已写匹配明细")
+    write_detail_sheet(wb, results, progress_callback=_progress)
+    _progress(88, "匹配明细已写完")
     write_summary_sheet(wb, results, orders, invoices, so, si)
     _progress(90, "已写型号汇总")
-    write_rules_sheet(wb, period)
-    write_preprocessed_sheets(wb, orders, invoices)
-    _progress(95, "正在保存文件…")
+    write_rules_sheet(
+        wb, period, mode=mode, stat_objects=selected_stats if mode == MODE_STRATEGIC else None
+    )
+    _progress(91, "正在写入预处理表…")
+    write_preprocessed_sheets(
+        wb, orders, invoices, progress_callback=_progress
+    )
+    _progress(96, "正在保存文件…")
 
     wb.save(output_path)
     _progress(100, "导出完成")
@@ -1749,6 +2033,12 @@ def run_reconcile(
 
     status_counts = dict(Counter(r["status"] for r in results))
     stats = {
+        "mode": mode,
+        "mode_label": MODE_LABELS.get(mode, mode),
+        "stat_objects": selected_stats if mode == MODE_STRATEGIC else [],
+        "strategic_model_count": len(strategic_model_keys),
+        "order_rows_before_filter": order_rows_raw,
+        "invoice_rows_before_filter": invoice_rows_raw,
         "order_rows": len(orders),
         "invoice_rows": len(invoices),
         "order_excluded_rows": len(excluded_orders),
@@ -1812,6 +2102,64 @@ def peek_period_from_invoice_file(invoice_path: Path, account_days: int) -> Peri
         raise ValueError("发票文件没有有效数据行，无法推断查询周期")
     invoices = preprocess_invoices(inv_raw)
     return infer_period_from_invoices(invoices, account_days)
+
+
+def normalize_stat_object(v) -> str | None:
+    """统计对象规范化：去首尾空白；空值返回 None。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def collect_stat_objects_from_rows(rows) -> list[str]:
+    """从订单行收集非空统计对象（去重排序）。"""
+    seen: set[str] = set()
+    for row in rows:
+        s = normalize_stat_object(row.get("统计对象"))
+        if s:
+            seen.add(s)
+    return sorted(seen)
+
+
+def list_stat_objects(order_path) -> list[str]:
+    """读取订单文件，返回可用于战略品监察的「统计对象」列表。"""
+    path = Path(order_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"订单文件不存在：{path}")
+    _, order_raw, _ = read_sheet_rows(path, required_headers=ORDER_REQUIRED_HEADERS)
+    if not order_raw:
+        raise ValueError("订单文件没有有效数据行")
+    values = collect_stat_objects_from_rows(order_raw)
+    if not values:
+        raise ValueError(
+            "订单数据中未找到非空的「统计对象」列值，无法进行战略品监察。"
+            "请确认表头含「统计对象」且至少有一行填写了类别。"
+        )
+    return values
+
+
+def filter_for_strategic(orders, invoices, stat_objects: list[str]):
+    """按所选统计对象过滤：仅保留对应订单型号及同型号发票；其余丢弃。"""
+    selected = {
+        normalize_stat_object(x)
+        for x in (stat_objects or [])
+        if normalize_stat_object(x)
+    }
+    if not selected:
+        raise ValueError("战略品监察请至少选择一个统计对象")
+
+    filtered_orders = [
+        o for o in orders if normalize_stat_object(o.get("统计对象")) in selected
+    ]
+    model_keys = {o["_model_key"] for o in filtered_orders if o.get("_model_key")}
+    if not model_keys:
+        raise ValueError("所选统计对象下没有可比对的订单型号")
+
+    filtered_invoices = [
+        i for i in invoices if i.get("_model_key") in model_keys
+    ]
+    return filtered_orders, filtered_invoices, sorted(model_keys)
 
 
 def resolve_period_interactively(
@@ -1911,6 +2259,19 @@ def build_arg_parser():
         action="store_true",
         help="Also write preprocessed order/invoice xlsx files",
     )
+    p.add_argument(
+        "--mode",
+        choices=[MODE_DAILY, MODE_STRATEGIC],
+        default=MODE_DAILY,
+        help="Monitoring mode: daily (full) or strategic (filter by 统计对象)",
+    )
+    p.add_argument(
+        "--stat-object",
+        action="append",
+        default=None,
+        dest="stat_objects",
+        help="Strategic mode: 统计对象 category (repeatable)",
+    )
     return p
 
 
@@ -1950,6 +2311,9 @@ def main(argv=None):
         non_interactive=non_interactive,
     )
 
+    if args.mode == MODE_STRATEGIC and not args.stat_objects:
+        parser.error("战略品监察(--mode strategic)需至少指定一个 --stat-object")
+
     stats = run_reconcile(
         order_path,
         invoice_path,
@@ -1958,11 +2322,21 @@ def main(argv=None):
         period_start=period_start,
         period_end=period_end,
         account_days=days,
+        mode=args.mode,
+        stat_objects=args.stat_objects,
     )
     stats["period_inferred"] = still_inferred
 
     print("")
     print("=== 比对完成 ===")
+    print(f"监察方式: {stats.get('mode_label', stats.get('mode'))}")
+    if stats.get("mode") == MODE_STRATEGIC:
+        print(f"统计对象: {'、'.join(stats.get('stat_objects') or [])}")
+        print(
+            f"过滤前订单/发票: {stats.get('order_rows_before_filter')}/"
+            f"{stats.get('invoice_rows_before_filter')} → "
+            f"{stats['order_rows']}/{stats['invoice_rows']}"
+        )
     print(
         f"订单行: {stats['order_rows']}  发票行: {stats['invoice_rows']}  "
         f"结果行: {stats['result_rows']}"
