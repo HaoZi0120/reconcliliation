@@ -26,7 +26,7 @@ from reconcile import (
 
 APP_TITLE = "订单发票比对工具"
 DEFAULT_RESULT_NAME = "比对结果.xlsx"
-APP_VERSION = "Pro7.6"
+APP_VERSION = "Pro7.8"
 
 FORMAT_HELP_TEXT = """【订单数据】
 首行表头须包含以下列（可有多余列，列顺序不限）：
@@ -212,17 +212,59 @@ class Api:
         return {"ok": True, "path": path, "output": out}
 
     def list_stat_objects(self, order_path: str = ""):
-        """供战略品监察：读取订单「统计对象」去重列表。"""
+        """供战略品监察：读取订单「统计对象」去重列表（同步）。"""
         path = (order_path or "").strip()
         if not path:
             return {"ok": False, "error": "请先选择订单数据文件。"}
         try:
             values = list_stat_objects(path)
             self._log("INFO", f"已加载统计对象 {len(values)} 类：{'、'.join(values)}")
-            return {"ok": True, "items": values}
+            return {"ok": True, "items": values, "path": path}
         except Exception as exc:
             self._log("WARN", f"加载统计对象失败：{exc}")
-            return {"ok": False, "error": str(exc), "items": []}
+            return {"ok": False, "error": str(exc), "items": [], "path": path}
+
+    def prefetch_stat_objects(self, order_path: str = "", request_id: int = 0):
+        """后台预取统计对象：立即返回，完成后回调 window.__hostStatPrefetch。"""
+        path = (order_path or "").strip()
+        try:
+            rid = int(request_id or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        if not path:
+            return {"ok": False, "started": False, "error": "请先选择订单数据文件。", "requestId": rid}
+
+        def work():
+            try:
+                values = list_stat_objects(path)
+                self._log("INFO", f"已预取统计对象 {len(values)} 类")
+                payload = json.dumps(
+                    {
+                        "ok": True,
+                        "items": values,
+                        "path": path,
+                        "requestId": rid,
+                    },
+                    ensure_ascii=False,
+                )
+            except Exception as exc:
+                self._log("WARN", f"预取统计对象失败：{exc}")
+                payload = json.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "items": [],
+                        "path": path,
+                        "requestId": rid,
+                    },
+                    ensure_ascii=False,
+                )
+            self._js(
+                f"window.__hostStatPrefetch && window.__hostStatPrefetch({payload})"
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True, "started": True, "requestId": rid, "path": path}
 
     def browse_invoice(self, account_days: int | None = None):
         """仅弹出文件对话框；查询周期推断请调用 analyze_invoice。"""
